@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wow-sidecar"
+version = "0.0.0.dev0"
+description = "Trusted-host actuator for bounded durable automation"
+requires-python = ">=3.11"
+dependencies = [
+  "PyJWT[crypto]==2.10.1",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
