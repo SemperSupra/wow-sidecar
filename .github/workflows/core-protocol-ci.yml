@@ -1,0 +1,31 @@
+name: WOW Sidecar core protocol CI
+
+on:
+  pull_request:
+    paths:
+      - 'src/wow_sidecar/**'
+      - 'tests/**'
+      - 'pyproject.toml'
+      - '.github/workflows/core-protocol-ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Create isolated Python environment
+        run: python3 -m venv .venv
+      - name: Install package and test dependencies
+        run: |
+          .venv/bin/python -m pip install --disable-pip-version-check --upgrade pip
+          .venv/bin/python -m pip install --disable-pip-version-check . pytest
+      - name: Compile
+        run: .venv/bin/python -m compileall -q src tests
+      - name: Test
+        run: .venv/bin/python -m pytest -q
