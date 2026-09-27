@@ -7,6 +7,7 @@ from pathlib import Path
 
 from wow_sidecar.errors import SidecarError
 from wow_sidecar.host_control import CLAIM_REF_PREFIX, RECEIPT_SCHEMA
+from wow_sidecar import host_control_observer as observer_module
 from wow_sidecar.host_control_observer import HostOperatorReceipt, observe_request
 
 
@@ -176,7 +177,7 @@ class ObserveRequestTests(unittest.TestCase):
         self.assertEqual(control.reads, [])
 
     def test_observer_source_contains_no_git_mutation_methods(self):
-        source = Path(__file__).resolve().parents[1] / "host_control_observer.py"
+        source = Path(observer_module.__file__).resolve()
         text = source.read_text(encoding="utf-8")
         for method in ('"POST"', '"PUT"', '"PATCH"', '"DELETE"'):
             self.assertNotIn(method, text)
