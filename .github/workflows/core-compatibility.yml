@@ -1,0 +1,39 @@
+name: WOW Sidecar core compatibility
+
+on:
+  pull_request:
+    paths:
+      - 'pyproject.toml'
+      - 'src/wow_sidecar/**'
+      - 'tests/**'
+      - '.github/workflows/core-compatibility.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compatibility:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Public-safety projection guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          if grep -R -n -E 'agent-dispatch-private|agent-dispatch-execution-control-private|truenas-app-foundry-private|garm-provider-truenas-private' src tests; then
+            echo 'private repository identifier found in projected source/test surface' >&2
+            exit 1
+          fi
+          if grep -R -n -E -- '-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----' src tests; then
+            echo 'private key material found in projected source/test surface' >&2
+            exit 1
+          fi
+      - name: Install candidate
+        run: python -m pip install --disable-pip-version-check -e .
+      - name: Run extracted compatibility suite
+        run: python -m unittest discover -s tests -v
