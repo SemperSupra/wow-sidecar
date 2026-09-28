@@ -1,0 +1,39 @@
+{
+  "schema": "wow-sidecar.wheelhouse-lock.v1",
+  "source_revision": "c83e56d4378853538a4ca8ae7ca56f9763d50fee",
+  "target": {
+    "implementation": "CPython",
+    "python": "3.12",
+    "python_abi": "cp312",
+    "machine": "x86_64",
+    "glibc_floor": "2.34"
+  },
+  "candidate": {
+    "workflow_run_id": 36379398872,
+    "artifact_id": 10952063379,
+    "artifact_name": "wheelhouse-c83e56d4378853538a4ca8ae7ca56f9763d50fee",
+    "manifest_digest": "sha256:68b6fa6c8af4ef62c1d2ca3b9a9ac192bc7b2901edc1d4257321e94044dc78f0"
+  },
+  "wheels": [
+    {
+      "filename": "PyJWT-2.10.1-py3-none-any.whl",
+      "sha256": "sha256:dcdd193e30abefd5debf142f9adfcdd2b58004e644f25406ffaebd50bd98dacb"
+    },
+    {
+      "filename": "cffi-2.1.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+      "sha256": "sha256:c1453022f490d2459a11819d83ad1d586e9ff65a12ac3e705ffebd46d3685dcf"
+    },
+    {
+      "filename": "cryptography-50.0.1-cp311-abi3-manylinux_2_34_x86_64.whl",
+      "sha256": "sha256:51afcfceb15597cf2635068e4ac9a56b2abde622edde17f37d85fd7b5306497a"
+    },
+    {
+      "filename": "pycparser-3.0-py3-none-any.whl",
+      "sha256": "sha256:b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992"
+    },
+    {
+      "filename": "wow_sidecar-0.0.0.dev0-py3-none-any.whl",
+      "sha256": "sha256:0c01fda9aca3f681aa0520f0c14fb9e921fc46b8e4055aa13b6ad6bbd346d2d7"
+    }
+  ]
+}
