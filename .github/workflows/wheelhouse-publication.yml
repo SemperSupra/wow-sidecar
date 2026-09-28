@@ -1,0 +1,161 @@
+name: WOW Sidecar wheelhouse publication
+
+on:
+  pull_request:
+    paths:
+      - 'deploy/wheelhouse-linux-cp312-x86_64.lock.json'
+      - 'deploy/wheelhouse-publication.json'
+      - '.github/scripts/package-wheelhouse.py'
+      - '.github/scripts/verify-wheelhouse-lock.py'
+      - '.github/workflows/wheelhouse-publication.yml'
+      - 'docs/wheelhouse-publication.md'
+  push:
+    branches: [main]
+    paths:
+      - 'deploy/wheelhouse-linux-cp312-x86_64.lock.json'
+      - 'deploy/wheelhouse-publication.json'
+      - '.github/scripts/package-wheelhouse.py'
+      - '.github/scripts/verify-wheelhouse-lock.py'
+      - '.github/workflows/wheelhouse-publication.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  package-and-publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+
+      - name: Read admitted lock
+        id: lock
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          from pathlib import Path
+          lock = json.loads(Path("deploy/wheelhouse-linux-cp312-x86_64.lock.json").read_text())
+          candidate = lock["candidate"]
+          print(f"run_id={candidate['workflow_run_id']}")
+          print(f"artifact_id={candidate['artifact_id']}")
+          print(f"artifact_name={candidate['artifact_name']}")
+          print(f"source_revision={lock['source_revision']}")
+          PY
+
+      - name: Verify source artifact identity
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_ID: ${{ steps.lock.outputs.run_id }}
+          ARTIFACT_ID: ${{ steps.lock.outputs.artifact_id }}
+          ARTIFACT_NAME: ${{ steps.lock.outputs.artifact_name }}
+        run: |
+          set -euo pipefail
+          observed="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/artifacts"             --jq ".artifacts[] | select((.id|tostring)==\"$ARTIFACT_ID\") | .name")"
+          test "$observed" = "$ARTIFACT_NAME"
+
+      - name: Download exact admitted candidate
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
+        with:
+          name: ${{ steps.lock.outputs.artifact_name }}
+          path: wheelhouse
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.lock.outputs.run_id }}
+
+      - name: Verify lock and artifact bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python .github/scripts/verify-wheelhouse-lock.py             deploy/wheelhouse-linux-cp312-x86_64.lock.json             wheelhouse
+
+      - name: Build deterministic publication bundle twice
+        id: bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist-a dist-b
+          source_revision="${{ steps.lock.outputs.source_revision }}"
+          asset="wow-sidecar-wheelhouse-$source_revision-linux-cp312-x86_64.zip"
+          python .github/scripts/package-wheelhouse.py             deploy/wheelhouse-linux-cp312-x86_64.lock.json wheelhouse "dist-a/$asset"
+          python .github/scripts/package-wheelhouse.py             deploy/wheelhouse-linux-cp312-x86_64.lock.json wheelhouse "dist-b/$asset"
+          a="$(sha256sum "dist-a/$asset" | awk '{print $1}')"
+          b="$(sha256sum "dist-b/$asset" | awk '{print $1}')"
+          test "$a" = "$b"
+          echo "asset=$asset" >> "$GITHUB_OUTPUT"
+          echo "digest=sha256:$a" >> "$GITHUB_OUTPUT"
+          printf 'publication-bundle asset=%s sha256:%s\n' "$asset" "$a"
+
+      - name: Check publication descriptor
+        id: publication
+        shell: bash
+        env:
+          ASSET: ${{ steps.bundle.outputs.asset }}
+          DIGEST: ${{ steps.bundle.outputs.digest }}
+          SOURCE_REVISION: ${{ steps.lock.outputs.source_revision }}
+        run: |
+          set -euo pipefail
+          if [[ ! -f deploy/wheelhouse-publication.json ]]; then
+            if [[ "$GITHUB_EVENT_NAME" = "push" ]]; then
+              echo 'publication descriptor is required on main' >&2
+              exit 1
+            fi
+            echo 'descriptor_present=false' >> "$GITHUB_OUTPUT"
+            printf 'candidate publication descriptor: source_revision=%s asset=%s digest=%s\n'               "$SOURCE_REVISION" "$ASSET" "$DIGEST"
+            exit 0
+          fi
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          p = json.loads(Path("deploy/wheelhouse-publication.json").read_text())
+          required = {"schema", "source_revision", "tag", "asset_name", "bundle_sha256", "kind"}
+          if set(p) != required:
+              raise SystemExit("publication descriptor fields are invalid")
+          if p["schema"] != "wow-sidecar.wheelhouse-publication.v1":
+              raise SystemExit("unsupported publication descriptor schema")
+          if p["source_revision"] != os.environ["SOURCE_REVISION"]:
+              raise SystemExit("publication source revision mismatch")
+          if p["asset_name"] != os.environ["ASSET"]:
+              raise SystemExit("publication asset name mismatch")
+          if p["bundle_sha256"] != os.environ["DIGEST"]:
+              raise SystemExit("publication bundle digest mismatch")
+          if p["kind"] != "prerelease-evidence":
+              raise SystemExit("publication kind must remain prerelease-evidence")
+          if not p["tag"].startswith("wheelhouse-"):
+              raise SystemExit("publication tag is invalid")
+          print(json.dumps(p, sort_keys=True))
+          PY
+          echo 'descriptor_present=true' >> "$GITHUB_OUTPUT"
+
+      - name: Publish or verify immutable prerelease evidence
+        if: github.event_name == 'push' && steps.publication.outputs.descriptor_present == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ASSET: ${{ steps.bundle.outputs.asset }}
+          DIGEST: ${{ steps.bundle.outputs.digest }}
+        run: |
+          set -euo pipefail
+          tag="$(python -c 'import json; print(json.load(open("deploy/wheelhouse-publication.json"))["tag"])')"
+          source_revision="$(python -c 'import json; print(json.load(open("deploy/wheelhouse-publication.json"))["source_revision"])')"
+          mkdir -p release-verify
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            release_json="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag")"
+            test "$(jq -r '.prerelease' <<<"$release_json")" = "true"
+            test "$(jq -r '.target_commitish' <<<"$release_json")" = "$source_revision"
+          else
+            gh release create "$tag"               --target "$source_revision"               --prerelease               --title "WOW Sidecar wheelhouse evidence $source_revision"               --notes "Qualified prerelease evidence bundle for the admitted CPython 3.12 / x86_64 / glibc>=2.34 wheelhouse. This is not a WOW Sidecar product release."               "dist-a/$ASSET"
+          fi
+
+          gh release download "$tag" --pattern "$ASSET" --dir release-verify
+          observed="$(sha256sum "release-verify/$ASSET" | awk '{print "sha256:"$1}')"
+          test "$observed" = "$DIGEST"
+          printf 'persistent-publication tag=%s asset=%s digest=%s\n' "$tag" "$ASSET" "$DIGEST"
