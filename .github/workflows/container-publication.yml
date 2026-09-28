@@ -103,9 +103,16 @@ jobs:
             docker pull "$REF"
           fi
           docker run --rm --entrypoint /bin/sh "$REF" -ec '
-            command -v bash >/dev/null
-            command -v git >/dev/null
-            command -v gh >/dev/null
+            missing=0
+            for tool in bash git gh; do
+              if command -v "$tool" >/dev/null 2>&1; then
+                echo "PRESENT:$tool"
+              else
+                echo "MISSING:$tool"
+                missing=1
+              fi
+            done
+            exit "$missing"
           '
           observed="$(docker run --rm --entrypoint cat "$REF" /usr/share/wow-sidecar/source-revision)"
           test "$observed" = "$SOURCE_REVISION"
