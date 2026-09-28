@@ -1,0 +1,88 @@
+name: WOW Sidecar wheelhouse admission
+
+on:
+  pull_request:
+    paths:
+      - 'deploy/wheelhouse-linux-cp312-x86_64.lock.json'
+      - '.github/scripts/verify-wheelhouse-lock.py'
+      - '.github/workflows/wheelhouse-admission.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  admit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+
+      - name: Read lock provenance
+        id: lock
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          from pathlib import Path
+          lock = json.loads(Path("deploy/wheelhouse-linux-cp312-x86_64.lock.json").read_text())
+          candidate = lock["candidate"]
+          print(f"run_id={candidate['workflow_run_id']}")
+          print(f"artifact_id={candidate['artifact_id']}")
+          print(f"artifact_name={candidate['artifact_name']}")
+          print(f"source_revision={lock['source_revision']}")
+          PY
+
+      - name: Verify artifact identity belongs to candidate run
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_ID: ${{ steps.lock.outputs.run_id }}
+          ARTIFACT_ID: ${{ steps.lock.outputs.artifact_id }}
+          ARTIFACT_NAME: ${{ steps.lock.outputs.artifact_name }}
+        run: |
+          set -euo pipefail
+          observed="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/artifacts"             --jq ".artifacts[] | select((.id|tostring)==\"$ARTIFACT_ID\") | .name")"
+          test "$observed" = "$ARTIFACT_NAME"
+
+      - name: Download exact candidate artifact
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
+        with:
+          name: ${{ steps.lock.outputs.artifact_name }}
+          path: wheelhouse
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.lock.outputs.run_id }}
+
+      - name: Verify admitted lock against exact artifact bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python .github/scripts/verify-wheelhouse-lock.py             deploy/wheelhouse-linux-cp312-x86_64.lock.json             wheelhouse
+
+      - name: Re-prove offline environment from admitted bytes
+        shell: bash
+        env:
+          SOURCE_REVISION: ${{ steps.lock.outputs.source_revision }}
+        run: |
+          set -euo pipefail
+          PYTHONPATH=src python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import tempfile
+          from wow_sidecar.integrations.linux_environment import build_linux_environment
+
+          with tempfile.TemporaryDirectory() as raw:
+              result = build_linux_environment(
+                  root=Path(raw).resolve(),
+                  wheelhouse=Path("wheelhouse").resolve(),
+                  revision=os.environ["SOURCE_REVISION"],
+              )
+              print(json.dumps(result.receipt(), sort_keys=True))
+          PY
