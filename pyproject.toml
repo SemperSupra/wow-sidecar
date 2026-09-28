@@ -16,3 +16,6 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[project.scripts]
+wow-sidecar-worker = "wow_sidecar.service:main"
