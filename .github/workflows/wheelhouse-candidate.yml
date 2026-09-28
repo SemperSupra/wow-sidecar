@@ -1,0 +1,108 @@
+name: WOW Sidecar wheelhouse candidate
+
+on:
+  pull_request:
+    paths:
+      - 'pyproject.toml'
+      - 'src/**'
+      - '.github/scripts/make-wheelhouse-manifest.py'
+      - '.github/workflows/wheelhouse-candidate.yml'
+      - 'docs/wheelhouse-provenance.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  SOURCE_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.SOURCE_REVISION }}
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+
+      - name: Record candidate substrate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, platform, sys
+          print(json.dumps({
+              "python": sys.version,
+              "implementation": platform.python_implementation(),
+              "machine": platform.machine(),
+              "platform": platform.platform(),
+          }, sort_keys=True))
+          PY
+
+      - name: Prove reproducible product wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          epoch="$(git show -s --format=%ct "$SOURCE_REVISION")"
+          export SOURCE_DATE_EPOCH="$epoch"
+          export PYTHONHASHSEED=0
+          mkdir -p product-a product-b wheelhouse
+          python -m pip wheel --disable-pip-version-check --no-deps --wheel-dir product-a .
+          python -m pip wheel --disable-pip-version-check --no-deps --wheel-dir product-b .
+          a="$(sha256sum product-a/wow_sidecar-*.whl | awk '{print $1}')"
+          b="$(sha256sum product-b/wow_sidecar-*.whl | awk '{print $1}')"
+          test "$a" = "$b"
+          cp product-a/wow_sidecar-*.whl wheelhouse/
+          printf 'product-wheel sha256:%s source_revision=%s source_date_epoch=%s\n' "$a" "$SOURCE_REVISION" "$SOURCE_DATE_EPOCH"
+
+      - name: Resolve binary dependency candidate set
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip download             --disable-pip-version-check             --only-binary=:all:             --dest wheelhouse             'PyJWT[crypto]==2.10.1'
+          test -z "$(find wheelhouse -maxdepth 1 -type f ! -name '*.whl' -print)"
+
+      - name: Build and verify exact wheelhouse manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          python .github/scripts/make-wheelhouse-manifest.py "$SOURCE_REVISION" wheelhouse
+          PYTHONPATH=src python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import tempfile
+          from wow_sidecar.integrations.linux_environment import (
+              build_linux_environment,
+              load_wheelhouse_manifest,
+          )
+
+          revision = os.environ["SOURCE_REVISION"]
+          wheelhouse = Path("wheelhouse").resolve()
+          manifest = load_wheelhouse_manifest(wheelhouse, expected_revision=revision)
+          with tempfile.TemporaryDirectory() as raw:
+              root = Path(raw).resolve()
+              result = build_linux_environment(
+                  root=root,
+                  wheelhouse=wheelhouse,
+                  revision=revision,
+              )
+              print(json.dumps({
+                  "manifest_digest": manifest.manifest_digest,
+                  "wheel_count": len(manifest.wheels),
+                  "environment_receipt": result.receipt(),
+              }, sort_keys=True))
+          PY
+          echo '--- admitted-candidate-manifest ---'
+          cat wheelhouse/manifest.json
+
+      - name: Upload candidate wheelhouse evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: wheelhouse-${{ env.SOURCE_REVISION }}
+          path: wheelhouse/
+          if-no-files-found: error
+          retention-days: 7
