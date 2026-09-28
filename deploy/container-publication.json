@@ -1,6 +1,6 @@
 {
   "schema": "wow-sidecar.container-publication.v1",
-  "phase": "candidate-unpublished",
+  "phase": "published",
   "source_revision": "246a7f635c70cf93803b1932ef4129040f6ff458",
   "published_equivalent_revision": "8c2949691265027acd039fec674787da05c4fd99",
   "source_tree": "5d43ddcfb8d36748448d8c3bebef0c4abfd12f0f",
@@ -14,7 +14,7 @@
   "registry": {
     "repository": "ghcr.io/sempersupra/wow-sidecar",
     "tag": "source-246a7f635c70cf93803b1932ef4129040f6ff458",
-    "reference": null
+    "reference": "ghcr.io/sempersupra/wow-sidecar@sha256:6240b57e69134ad69379fbfbd7ab7aa1768a49c4c598a7d29f2aa0e65d200df3"
   },
   "runtime": {
     "user": "wow-sidecar:wow-sidecar",
