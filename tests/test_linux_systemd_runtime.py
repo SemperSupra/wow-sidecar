@@ -5,7 +5,7 @@ import tempfile
 import unittest
 
 from wow_sidecar.errors import SidecarError
-from wow_sidecar.integrations.linux_cutover import CANDIDATE_UNIT, LEGACY_UNITS, ServiceState
+from wow_sidecar.integrations.linux_cutover import CANDIDATE_UNIT, CORESIDENT_UNITS, LEGACY_UNITS, ServiceState
 from wow_sidecar.integrations.linux_systemd import LinuxServiceSpec, UNIT_PATH, render_systemd_unit
 from wow_sidecar.integrations.linux_systemd_runtime import (
     CommandResult,
@@ -41,7 +41,7 @@ class SystemctlRuntimeTests(unittest.TestCase):
     def test_observe_uses_fixed_binary_argv_and_exact_state_mapping(self):
         runner = ScriptedRunner([
             show(active="active", unit_file="enabled"),
-            show(load="not-found", active="inactive", unit_file=""),
+            show(active="active", unit_file="enabled"),
         ])
         control = SystemctlControl(runner=runner)
 
@@ -50,8 +50,8 @@ class SystemctlRuntimeTests(unittest.TestCase):
             ServiceState(True, True, True),
         )
         self.assertEqual(
-            control.observe(LEGACY_UNITS[1]),
-            ServiceState(False, False, False),
+            control.observe(CORESIDENT_UNITS[0]),
+            ServiceState(True, True, True),
         )
         self.assertEqual(
             runner.commands[0],
@@ -66,6 +66,7 @@ class SystemctlRuntimeTests(unittest.TestCase):
                 LEGACY_UNITS[0],
             ),
         )
+        self.assertEqual(runner.commands[1][-1], CORESIDENT_UNITS[0])
 
     def test_transitional_failed_or_nonbinary_enablement_states_fail_closed(self):
         for response in (
@@ -105,7 +106,9 @@ class SystemctlRuntimeTests(unittest.TestCase):
         observed = [command[3:] for command in runner.commands]
         self.assertEqual(observed, expected)
 
-        with self.assertRaisesRegex(SidecarError, "outside the admitted"):
+        with self.assertRaisesRegex(SidecarError, "outside the admitted mutation"):
+            control.start(CORESIDENT_UNITS[0])
+        with self.assertRaisesRegex(SidecarError, "outside the admitted mutation"):
             control.start("ssh.service")
 
     def test_nonzero_systemctl_result_is_sanitized_failure(self):
