@@ -1,0 +1,8 @@
+{
+  "schema": "wow-sidecar.wheelhouse-publication.v1",
+  "source_revision": "c83e56d4378853538a4ca8ae7ca56f9763d50fee",
+  "tag": "wheelhouse-c83e56d4378853538a4ca8ae7ca56f9763d50fee-linux-cp312-x86_64-v1",
+  "asset_name": "wow-sidecar-wheelhouse-c83e56d4378853538a4ca8ae7ca56f9763d50fee-linux-cp312-x86_64.zip",
+  "bundle_sha256": "sha256:a01801ad6de553babee59c9929d24d268da74df220dab3ff5fa76ef3074b9f35",
+  "kind": "prerelease-evidence"
+}
