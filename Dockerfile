@@ -8,7 +8,7 @@ RUN test -n "$WOW_SOURCE_REVISION" \
     && case "$WOW_SOURCE_REVISION" in (*[!0-9a-f]*|'') exit 2;; esac \
     && test "${#WOW_SOURCE_REVISION}" -eq 40
 
-WORKDIR /opt/wow-sidecar-build
+WORKDIR /build
 COPY pyproject.toml ./
 COPY src ./src
 RUN python -m pip install --disable-pip-version-check --no-cache-dir . \
