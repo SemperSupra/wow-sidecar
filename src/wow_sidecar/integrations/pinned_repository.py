@@ -5,7 +5,7 @@ import os
 from pathlib import Path, PurePosixPath
 import subprocess
 import tempfile
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from ..errors import SidecarError
 from ..host_control import HostOperatorRequest
@@ -16,13 +16,61 @@ def _require(condition: bool, message: str) -> None:
         raise SidecarError(message)
 
 
-def github_git_env(base: Mapping[str, str] | None = None) -> dict[str, str]:
+RepositoryTokenProvider = Callable[[str], str]
+
+
+def github_git_env(
+    token: str,
+    askpass_path: Path,
+    base: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    _require(
+        isinstance(token, str)
+        and bool(token)
+        and "\n" not in token
+        and "\x00" not in token,
+        "repository installation token is invalid",
+    )
+    _require(
+        isinstance(askpass_path, Path) and askpass_path.is_absolute(),
+        "askpass path must be absolute",
+    )
     env = dict(base if base is not None else os.environ)
+
+    # Remove ambient Git authentication/configuration so the pinned operator
+    # cannot silently depend on a host login, SSH agent, or credential helper.
+    for key in tuple(env):
+        if key.startswith("GIT_") or key in {"SSH_ASKPASS", "SSH_AUTH_SOCK"}:
+            env.pop(key, None)
+
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_CONFIG_GLOBAL"] = "/dev/null"
     env["GIT_CONFIG_COUNT"] = "1"
-    env["GIT_CONFIG_KEY_0"] = "credential.https://github.com.helper"
-    env["GIT_CONFIG_VALUE_0"] = "!gh auth git-credential"
+    env["GIT_CONFIG_KEY_0"] = "credential.helper"
+    env["GIT_CONFIG_VALUE_0"] = ""
     env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GIT_ASKPASS_REQUIRE"] = "force"
+    env["GIT_ASKPASS"] = str(askpass_path)
+    env["WOW_SIDECAR_GIT_TOKEN"] = token
     return env
+
+
+def _write_askpass(path: Path) -> None:
+    _require(path.is_absolute(), "askpass path must be absolute")
+    _require(not path.exists() and not path.is_symlink(), "askpass path already exists")
+    raw = b"""#!/bin/sh
+case "$1" in
+  *Username*) printf '%s\\n' 'x-access-token' ;;
+  *Password*) printf '%s\\n' "$WOW_SIDECAR_GIT_TOKEN" ;;
+  *) exit 1 ;;
+esac
+"""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o700)
+    try:
+        os.write(fd, raw)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 @dataclass(frozen=True)
@@ -76,12 +124,21 @@ class PinnedRepositoryOperatorSpec:
 class PinnedRepositoryOperator:
     """Execute one locally configured script from one exact repository revision.
 
-    The request supplies no repository, revision, path, command, arguments, or
-    environment. Those values are fixed by local registry configuration.
+    Repository transport is authenticated by an exact-repository GitHub App
+    installation token supplied by the worker. No host gh login, SSH identity,
+    command, repository, revision, path, arguments, or request environment is
+    accepted from the control request.
     """
 
-    def __init__(self, spec: PinnedRepositoryOperatorSpec):
+    def __init__(
+        self,
+        spec: PinnedRepositoryOperatorSpec,
+        *,
+        token_provider: RepositoryTokenProvider,
+    ):
+        _require(callable(token_provider), "repository token provider is required")
         self.spec = spec
+        self._token_provider = token_provider
 
     def _run(self, argv: list[str], *, env: dict[str, str] | None = None, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -106,26 +163,39 @@ class PinnedRepositoryOperator:
         _require(request.constraints.get("promotion_performed") is False, "promotion flag must remain false")
         _require(request.constraints.get("release_performed") is False, "release flag must remain false")
 
-        auth = self._run(["gh", "auth", "status"])
-        _require(auth.returncode == 0, "trusted host gh authentication is unavailable")
+        try:
+            token = self._token_provider(spec.repository)
+        except Exception as exc:
+            raise SidecarError("repository installation token is unavailable") from exc
+        _require(
+            isinstance(token, str)
+            and bool(token)
+            and "\n" not in token
+            and "\x00" not in token,
+            "repository installation token is invalid",
+        )
 
-        git_env = github_git_env()
         remote = f"https://github.com/{spec.repository}.git"
 
-        if spec.require_main_revision:
-            main = self._run(
-                ["git", "ls-remote", "--exit-code", remote, "refs/heads/main"],
-                env=git_env,
-            )
-            _require(main.returncode == 0, "cannot read canonical repository main")
-            fields = main.stdout.strip().split()
-            _require(
-                len(fields) >= 1 and fields[0] == spec.revision,
-                "canonical repository main no longer matches admitted revision",
-            )
-
         with tempfile.TemporaryDirectory(prefix="wow-sidecar-pinned-operator-") as tmp:
-            checkout = Path(tmp) / "operator"
+            temp_root = Path(tmp)
+            checkout = temp_root / "operator"
+            askpass = temp_root / "git-askpass"
+            _write_askpass(askpass)
+            git_env = github_git_env(token, askpass)
+
+            if spec.require_main_revision:
+                main = self._run(
+                    ["git", "ls-remote", "--exit-code", remote, "refs/heads/main"],
+                    env=git_env,
+                )
+                _require(main.returncode == 0, "cannot read canonical repository main")
+                fields = main.stdout.strip().split()
+                _require(
+                    len(fields) >= 1 and fields[0] == spec.revision,
+                    "canonical repository main no longer matches admitted revision",
+                )
+
             clone = self._run(
                 ["git", "clone", "--quiet", "--filter=blob:none", "--no-checkout", remote, str(checkout)],
                 env=git_env,
@@ -150,8 +220,16 @@ class PinnedRepositoryOperator:
             _require(dirty.returncode == 0 and not dirty.stdout, "operator checkout is dirty")
 
             operator = checkout / spec.operator_path
-            _require(operator.is_file(), "configured operator path is missing")
+            _require(
+                operator.is_file()
+                and not operator.is_symlink()
+                and checkout.resolve() in operator.resolve().parents,
+                "configured operator path is missing or unsafe",
+            )
 
+            # Preserve the historical ability for an exact, trusted operator to
+            # use Git against its own source repository, but replace ambient host
+            # gh credentials with the exact-repository installation token.
             operator_env = dict(git_env)
             operator_env.update(spec.environment)
             completed = self._run(
