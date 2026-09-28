@@ -1,0 +1,19 @@
+{
+  "schema": "wow-sidecar.operator-profile.v1",
+  "profile": "example-fixed-operator",
+  "authority": {
+    "record": "github-issue-comment:ExampleOrg/authority#7:11",
+    "revision": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "state": "open"
+  },
+  "operator": {
+    "kind": "pinned-repository",
+    "repository": "ExampleOrg/operator-repo",
+    "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "operator_path": "tools/operator.sh",
+    "require_main_revision": true,
+    "environment": {
+      "FIXED_MODE": "1"
+    }
+  }
+}
