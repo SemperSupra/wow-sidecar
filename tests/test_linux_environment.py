@@ -32,21 +32,21 @@ def _fixture_wheel(directory: Path) -> Path:
             "def main():\n    print('fixture worker')\n    return 0\n",
         )
         archive.writestr(
-            `${dist}/METADATA`,
+            f"{dist}/METADATA",
             "Metadata-Version: 2.1\nName: wow-sidecar\nVersion: 0.0.0\n",
         )
         archive.writestr(
-            `${dist}/WHEEL`,
+            f"{dist}/WHEEL",
             "Wheel-Version: 1.0\n"
             "Generator: wow-sidecar-test\n"
             "Root-Is-Purelib: true\n"
             "Tag: py3-none-any\n",
         )
         archive.writestr(
-            `${dist}/entry_points.txt`,
+            f"{dist}/entry_points.txt",
             "[console_scripts]\nwow-sidecar-worker = wow_sidecar.service:main\n",
         )
-        archive.writestr(`${dist}/RECORD`, "")
+        archive.writestr(f"{dist}/RECORD", "")
     return wheel
 
 
