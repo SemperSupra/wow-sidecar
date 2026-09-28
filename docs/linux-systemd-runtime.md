@@ -9,10 +9,11 @@ The adapter:
 - invokes only the admitted absolute binary `/usr/bin/systemctl`;
 - never invokes a shell;
 - always adds `--no-ask-password --no-pager`;
-- accepts only three unit identities:
+- may observe exactly three unit identities:
   - `wow-sidecar-worker.service`;
   - `wow-sidecar-host-control.service`;
-  - `wow-sidecar-stack.service`;
+  - co-resident `wow-sidecar-stack.service`;
+- may mutate only `wow-sidecar-worker.service` and `wow-sidecar-host-control.service`; the MCP/tunnel stack is observation-only;
 - exposes only `start`, `stop`, `enable`, `disable`, `daemon-reload`, state observation, and a bounded candidate-health probe;
 - converts nonzero command results to a sanitized error without surfacing stdout/stderr.
 
