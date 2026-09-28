@@ -1,0 +1,24 @@
+{
+  "schema": "wow-sidecar.container-publication.v1",
+  "phase": "candidate-unpublished",
+  "source_revision": "246a7f635c70cf93803b1932ef4129040f6ff458",
+  "published_equivalent_revision": "8c2949691265027acd039fec674787da05c4fd99",
+  "source_tree": "5d43ddcfb8d36748448d8c3bebef0c4abfd12f0f",
+  "base_image": "python@sha256:f77ac9e44ae96ef2c90b8053ea08c31f8be030f824196b0ae4db6d462c84e51f",
+  "wheelhouse": {
+    "release_tag": "wheelhouse-246a7f635c70cf93803b1932ef4129040f6ff458-linux-cp312-x86_64-v1",
+    "asset_name": "wow-sidecar-wheelhouse-246a7f635c70cf93803b1932ef4129040f6ff458-linux-cp312-x86_64.zip",
+    "bundle_sha256": "sha256:ae25ea04cd2ebd49bdf0d3954439811630045c131e4774a27bfc962895239e4b",
+    "manifest_sha256": "sha256:48f300d6ef2b755a5a20d1e17e4979402b8df78048494397b6c8cab8c6f7fe58"
+  },
+  "registry": {
+    "repository": "ghcr.io/sempersupra/wow-sidecar",
+    "tag": "source-246a7f635c70cf93803b1932ef4129040f6ff458",
+    "reference": null
+  },
+  "runtime": {
+    "user": "wow-sidecar:wow-sidecar",
+    "revision_file": "/usr/share/wow-sidecar/source-revision",
+    "root_filesystem_compatible_read_only": true
+  }
+}
