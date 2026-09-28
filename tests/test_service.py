@@ -41,7 +41,7 @@ class ServiceEntrypointTests(unittest.TestCase):
             profile.write_text(json.dumps(profile_document()), encoding="utf-8")
             client = object()
             with (
-                patch.object(service, "local_checkout_revision", return_value=REVISION),
+                patch.object(service, "resolve_operator_revision", return_value=REVISION) as resolver,
                 patch.object(service, "GitHubIssueAuthorityReader", return_value="reader"),
                 patch.object(service, "process_cycle", return_value=[{"state": "receipted"}]) as process,
             ):
@@ -53,6 +53,7 @@ class ServiceEntrypointTests(unittest.TestCase):
                 )
                 result = cycle()
 
+            resolver.assert_called_once_with(repo_root=root, revision_file=None)
             self.assertEqual(revision, REVISION)
             self.assertEqual(result, [{"state": "receipted"}])
             kwargs = process.call_args.kwargs
@@ -62,6 +63,30 @@ class ServiceEntrypointTests(unittest.TestCase):
             self.assertEqual(set(kwargs["registry"]), {"synthetic-proof"})
             self.assertEqual(set(kwargs["authority_bindings"]), {"synthetic-proof"})
             self.assertEqual(kwargs["local_operator_revision"], REVISION)
+
+    def test_revision_file_identity_drives_same_worker_cycle(self):
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            root = Path(raw_tmp)
+            profile = root / "profile.json"
+            profile.write_text(json.dumps(profile_document()), encoding="utf-8")
+            revision_file = root / "source-revision"
+            revision_file.write_text(REVISION + "\n", encoding="utf-8")
+            revision_file.chmod(0o444)
+            client = object()
+            with (
+                patch.object(service, "GitHubIssueAuthorityReader", return_value="reader"),
+                patch.object(service, "process_cycle", return_value=[]) as process,
+            ):
+                cycle, revision = service.build_cycle(
+                    control_repository="ExampleOrg/control",
+                    profile_paths=[profile],
+                    revision_file=revision_file,
+                    client=client,
+                )
+                cycle()
+
+            self.assertEqual(revision, REVISION)
+            self.assertEqual(process.call_args.kwargs["local_operator_revision"], REVISION)
 
     def test_build_cycle_requires_profile(self):
         with self.assertRaisesRegex(ValueError, "at least one"):
@@ -85,6 +110,21 @@ class ServiceEntrypointTests(unittest.TestCase):
         value = json.loads(emit.call_args.args[0])
         self.assertEqual(value["operator_revision"], REVISION)
         self.assertEqual(value["results"], [{"state": "receipted"}])
+
+    def test_cli_revision_file_reaches_build_cycle(self):
+        with patch.object(service, "build_cycle", return_value=(lambda: [], REVISION)) as build:
+            rc = service.main([
+                "--control-repository", "ExampleOrg/control",
+                "--profile", "/tmp/profile.json",
+                "--revision-file", "/usr/share/wow-sidecar/source-revision",
+                "--once",
+            ])
+        self.assertEqual(rc, 0)
+        self.assertEqual(
+            build.call_args.kwargs["revision_file"],
+            Path("/usr/share/wow-sidecar/source-revision"),
+        )
+        self.assertIsNone(build.call_args.kwargs["repo_root"])
 
     def test_serve_delegates_bounded_polling(self):
         cycle = lambda: []
