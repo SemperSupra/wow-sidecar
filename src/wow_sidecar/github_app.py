@@ -123,6 +123,8 @@ class GitHubAppClient:
         if repository.count("/") != 1:
             raise SidecarError("repository must be owner/name")
         owner, repo = repository.split("/", 1)
+        if not owner or not repo or owner.strip() != owner or repo.strip() != repo:
+            raise SidecarError("repository must be owner/name")
         active_opener = opener if opener is not None else getattr(self, "opener", urllib.request.urlopen)
         value = self._request_json(
             "GET",
