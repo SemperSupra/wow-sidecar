@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from .errors import SidecarError
 from .host_control import OperatorHandler
@@ -44,7 +44,11 @@ def _string_map(value: Any, name: str) -> dict[str, str]:
     return out
 
 
-def load_profile(value: Any) -> LoadedOperatorProfile:
+def load_profile(
+    value: Any,
+    *,
+    repository_token_provider: Callable[[str], str],
+) -> LoadedOperatorProfile:
     """Load one exact, declarative, non-shell operator profile.
 
     Version 1 supports only the pinned-repository operator. Extension requires a
@@ -52,6 +56,7 @@ def load_profile(value: Any) -> LoadedOperatorProfile:
     closed.
     """
 
+    _require(callable(repository_token_provider), "repository token provider is required")
     _require(isinstance(value, dict), "operator profile document must be an object")
     _require(
         set(value) == {"schema", "profile", "authority", "operator"},
@@ -109,17 +114,27 @@ def load_profile(value: Any) -> LoadedOperatorProfile:
     )
     return LoadedOperatorProfile(
         profile=profile,
-        handler=PinnedRepositoryOperator(spec),
+        handler=PinnedRepositoryOperator(
+            spec,
+            token_provider=repository_token_provider,
+        ),
         authority=authority_binding,
     )
 
 
-def load_profile_file(path: str | Path) -> LoadedOperatorProfile:
+def load_profile_file(
+    path: str | Path,
+    *,
+    repository_token_provider: Callable[[str], str],
+) -> LoadedOperatorProfile:
     try:
         value = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise SidecarError(f"cannot load operator profile document: {type(exc).__name__}") from exc
-    return load_profile(value)
+    return load_profile(
+        value,
+        repository_token_provider=repository_token_provider,
+    )
 
 
 def compose_profiles(

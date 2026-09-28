@@ -33,13 +33,18 @@ def profile_document(name: str = "synthetic-proof"):
     }
 
 
+class FakeClient:
+    def installation_token_for_repository(self, repository: str) -> str:
+        return "token-for-" + repository.replace("/", "-")
+
+
 class ServiceEntrypointTests(unittest.TestCase):
     def test_build_cycle_loads_profiles_and_clean_revision(self):
         with tempfile.TemporaryDirectory() as raw_tmp:
             root = Path(raw_tmp)
             profile = root / "profile.json"
             profile.write_text(json.dumps(profile_document()), encoding="utf-8")
-            client = object()
+            client = FakeClient()
             with (
                 patch.object(service, "resolve_operator_revision", return_value=REVISION) as resolver,
                 patch.object(service, "GitHubIssueAuthorityReader", return_value="reader"),
@@ -72,7 +77,7 @@ class ServiceEntrypointTests(unittest.TestCase):
             revision_file = root / "source-revision"
             revision_file.write_text(REVISION + "\n", encoding="utf-8")
             revision_file.chmod(0o444)
-            client = object()
+            client = FakeClient()
             with (
                 patch.object(service, "GitHubIssueAuthorityReader", return_value="reader"),
                 patch.object(service, "process_cycle", return_value=[]) as process,
@@ -94,7 +99,7 @@ class ServiceEntrypointTests(unittest.TestCase):
                 control_repository="ExampleOrg/control",
                 profile_paths=[],
                 repo_root=Path("/tmp"),
-                client=object(),
+                client=FakeClient(),
             )
 
     def test_once_emits_revision_and_results(self):

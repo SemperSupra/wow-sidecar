@@ -23,9 +23,18 @@ def build_cycle(
 ) -> tuple[Callable[[], list[dict[str, Any]]], str]:
     if not profile_paths:
         raise ValueError("at least one operator profile is required")
-    profiles = [load_profile_file(path) for path in profile_paths]
-    registry, bindings = compose_profiles(profiles)
     active_client = client or GitHubAppClient.from_env()
+    token_provider = getattr(active_client, "installation_token_for_repository", None)
+    if not callable(token_provider):
+        raise ValueError("control client must provide repository-scoped installation tokens")
+    profiles = [
+        load_profile_file(
+            path,
+            repository_token_provider=token_provider,
+        )
+        for path in profile_paths
+    ]
+    registry, bindings = compose_profiles(profiles)
     authority_reader = GitHubIssueAuthorityReader(client=active_client)
     revision = resolve_operator_revision(
         repo_root=repo_root,

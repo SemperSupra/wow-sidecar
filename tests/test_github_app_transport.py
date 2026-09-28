@@ -99,7 +99,7 @@ class GitHubAppTransportBoundaryTests(unittest.TestCase):
                     "POST",
                     "/app/installations/77/access_tokens",
                     "synthetic-app-jwt",
-                    {},
+                    {"repositories": ["example-repo"]},
                     "object",
                 ),
             ],
