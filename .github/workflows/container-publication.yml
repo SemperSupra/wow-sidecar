@@ -112,13 +112,17 @@ jobs:
                 missing=1
               fi
             done
-            if [ "$missing" -ne 0 ]; then
-              echo "APT-CANDIDATES:"
-              apt-get update >/dev/null
-              apt-cache policy git gh ca-certificates
-            fi
             exit "$missing"
-          '
+          ' || tool_status=$?
+          tool_status="${tool_status:-0}"
+          if [[ "$tool_status" -ne 0 ]]; then
+            docker run --rm --user 0:0 --entrypoint /bin/sh "$REF" -ec '
+              apt-get update >/dev/null
+              echo "APT-CANDIDATES:"
+              apt-cache policy git gh ca-certificates
+            '
+            exit "$tool_status"
+          fi
           observed="$(docker run --rm --entrypoint cat "$REF" /usr/share/wow-sidecar/source-revision)"
           test "$observed" = "$SOURCE_REVISION"
           user="$(docker image inspect "$REF" --format '{{.Config.User}}')"
