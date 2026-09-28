@@ -8,6 +8,7 @@ import unittest
 from wow_sidecar.errors import SidecarError
 from wow_sidecar.integrations.linux_cutover import (
     CANDIDATE_UNIT,
+    CORESIDENT_UNITS,
     LEGACY_UNITS,
     CutoverJournal,
     ServiceState,
@@ -28,14 +29,14 @@ class FakeSystemd:
         self,
         *,
         legacy_primary: ServiceState = ServiceState(True, True, True),
-        legacy_secondary: ServiceState = ServiceState(False, False, False),
+        coresident: ServiceState = ServiceState(True, True, True),
         candidate: ServiceState = ServiceState(True, False, False),
         crash_after_mutation: int | None = None,
         fail_once_operation: str | None = None,
     ):
         self.states = {
             LEGACY_UNITS[0]: legacy_primary,
-            LEGACY_UNITS[1]: legacy_secondary,
+            CORESIDENT_UNITS[0]: coresident,
             CANDIDATE_UNIT: candidate,
         }
         self.mutation_count = 0
@@ -43,6 +44,7 @@ class FakeSystemd:
         self.fail_once_operation = fail_once_operation
         self.failed = False
         self.dual_active_ever = False
+        self.mutated_units: list[str] = []
 
     def observe(self, unit: str) -> ServiceState:
         return self.states[unit]
@@ -55,6 +57,7 @@ class FakeSystemd:
         if not current.present:
             raise SidecarError("cannot mutate absent unit")
         self.states[unit] = replace(current, **changes)
+        self.mutated_units.append(unit)
         self.mutation_count += 1
         candidate = self.states[CANDIDATE_UNIT]
         legacy_active = any(self.states[name].active for name in LEGACY_UNITS)
@@ -96,7 +99,8 @@ class LinuxCutoverTests(unittest.TestCase):
             self.assertFalse(control.dual_active_ever)
             self.assertEqual(control.observe(CANDIDATE_UNIT), ServiceState(True, True, True))
             self.assertEqual(control.observe(LEGACY_UNITS[0]), ServiceState(True, False, False))
-            self.assertFalse(control.observe(LEGACY_UNITS[1]).present)
+            self.assertEqual(control.observe(CORESIDENT_UNITS[0]), ServiceState(True, True, True))
+            self.assertNotIn(CORESIDENT_UNITS[0], control.mutated_units)
             self.assertEqual(self._journal(root).read().phase, "committed")
 
     def test_health_failure_rolls_back_exact_legacy_state(self):

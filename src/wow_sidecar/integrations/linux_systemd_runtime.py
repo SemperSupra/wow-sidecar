@@ -7,12 +7,13 @@ import subprocess
 from typing import Any, Callable
 
 from ..errors import SidecarError
-from .linux_cutover import CANDIDATE_UNIT, LEGACY_UNITS, ServiceState
+from .linux_cutover import CANDIDATE_UNIT, CORESIDENT_UNITS, LEGACY_UNITS, ServiceState
 from .linux_systemd import LinuxServiceSpec, UNIT_PATH, render_systemd_unit
 
 
 SYSTEMCTL = "/usr/bin/systemctl"
-ALLOWED_UNITS = frozenset((CANDIDATE_UNIT, *LEGACY_UNITS))
+OBSERVABLE_UNITS = frozenset((CANDIDATE_UNIT, *LEGACY_UNITS, *CORESIDENT_UNITS))
+MUTABLE_UNITS = frozenset((CANDIDATE_UNIT, *LEGACY_UNITS))
 ADMITTED_UNIT_FILE_STATES = frozenset({"enabled", "disabled"})
 
 
@@ -51,8 +52,13 @@ def _subprocess_runner(argv: tuple[str, ...]) -> CommandResult:
     return CommandResult(returncode=completed.returncode, stdout=completed.stdout)
 
 
-def _unit(value: str) -> str:
-    _require(value in ALLOWED_UNITS, "systemd unit is outside the admitted cutover set")
+def _observable_unit(value: str) -> str:
+    _require(value in OBSERVABLE_UNITS, "systemd unit is outside the admitted observation set")
+    return value
+
+
+def _mutable_unit(value: str) -> str:
+    _require(value in MUTABLE_UNITS, "systemd unit is outside the admitted mutation set")
     return value
 
 
@@ -90,7 +96,7 @@ class SystemctlControl:
         return result.stdout
 
     def observe(self, unit: str) -> ServiceState:
-        unit = _unit(unit)
+        unit = _observable_unit(unit)
         values = _parse_show(
             self._run(
                 "show",
@@ -127,7 +133,7 @@ class SystemctlControl:
 
     def _mutate(self, operation: str, unit: str) -> None:
         _require(operation in {"start", "stop", "enable", "disable"}, "unsupported systemctl mutation")
-        unit = _unit(unit)
+        unit = _mutable_unit(unit)
         self._run(operation, unit)
 
     def start(self, unit: str) -> None:
