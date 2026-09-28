@@ -34,24 +34,21 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          readarray -t fields < <(python3 - <<'PY'
-          import json
+          eval "$(python3 - <<'PY'
+          import json, shlex
           d=json.load(open("deploy/container-publication.json"))
-          print(d["wheelhouse"]["release_tag"])
-          print(d["wheelhouse"]["asset_name"])
-          print(d["wheelhouse"]["bundle_sha256"])
+          print("TAG="+shlex.quote(d["wheelhouse"]["release_tag"]))
+          print("ASSET="+shlex.quote(d["wheelhouse"]["asset_name"]))
+          print("EXPECTED="+shlex.quote(d["wheelhouse"]["bundle_sha256"]))
           PY
-          )
-          tag="${fields[0]}"
-          asset="${fields[1]}"
-          expected="${fields[2]}"
+          )"
           mkdir -p bundle wheelhouse
-          gh release download "$tag" --pattern "$asset" --dir bundle
-          observed="sha256:$(sha256sum "bundle/$asset" | awk '{print $1}')"
-          test "$observed" = "$expected"
-          unzip -q "bundle/$asset" -d wheelhouse
+          gh release download "$TAG" --pattern "$ASSET" --dir bundle
+          observed="sha256:$(sha256sum "bundle/$ASSET" | awk '{print $1}')"
+          test "$observed" = "$EXPECTED"
+          unzip -q "bundle/$ASSET" -d wheelhouse
           python3 .github/scripts/verify-wheelhouse-lock.py             deploy/wheelhouse-linux-cp312-x86_64.lock.json wheelhouse
-      - name: Build and verify offline image candidate
+      - name: Build and verify operator-capable image candidate
         shell: bash
         run: |
           set -euo pipefail
@@ -62,19 +59,37 @@ jobs:
           print("SOURCE_TREE="+shlex.quote(d["source_tree"]))
           print("BASE_IMAGE="+shlex.quote(d["base_image"]))
           print("BUNDLE_DIGEST="+shlex.quote(d["wheelhouse"]["bundle_sha256"]))
+          print("GIT_VERSION="+shlex.quote(d["runtime"]["git_package_version"]))
+          print("RUNTIME_UID="+shlex.quote(str(d["runtime"]["uid"])))
+          print("RUNTIME_GID="+shlex.quote(str(d["runtime"]["gid"])))
           PY
           )"
-          docker build --pull=false             --build-arg "PYTHON_BASE=$BASE_IMAGE"             --build-arg "WOW_SOURCE_REVISION=$SOURCE_REVISION"             --build-arg "WOW_SOURCE_TREE=$SOURCE_TREE"             --build-arg "WOW_WHEELHOUSE_BUNDLE_SHA256=$BUNDLE_DIGEST"             -f Dockerfile.wheelhouse             -t wow-sidecar:qualified .
+          docker build --pull=false             --build-arg "PYTHON_BASE=$BASE_IMAGE"             --build-arg "WOW_SOURCE_REVISION=$SOURCE_REVISION"             --build-arg "WOW_SOURCE_TREE=$SOURCE_TREE"             --build-arg "WOW_WHEELHOUSE_BUNDLE_SHA256=$BUNDLE_DIGEST"             --build-arg "WOW_GIT_VERSION=$GIT_VERSION"             --build-arg "WOW_RUNTIME_UID=$RUNTIME_UID"             --build-arg "WOW_RUNTIME_GID=$RUNTIME_GID"             -f Dockerfile.wheelhouse             -t wow-sidecar:qualified .
           observed="$(docker run --rm --entrypoint cat wow-sidecar:qualified /usr/share/wow-sidecar/source-revision)"
           test "$observed" = "$SOURCE_REVISION"
           user="$(docker image inspect wow-sidecar:qualified --format '{{.Config.User}}')"
-          test "$user" = 'wow-sidecar:wow-sidecar'
+          test "$user" = "$RUNTIME_UID:$RUNTIME_GID"
+          docker run --rm --entrypoint /bin/sh wow-sidecar:qualified -ec '
+            test "$(id -u)" = 10001
+            test "$(id -g)" = 10001
+            command -v bash >/dev/null
+            command -v git >/dev/null
+            if command -v gh >/dev/null 2>&1; then exit 2; fi
+            test "$(dpkg-query -W git | cut -f2)" = "1:2.47.3-0+deb13u1"
+            test "$(cat /usr/share/wow-sidecar/runtime-packages)" = "git=1:2.47.3-0+deb13u1"
+          '
           label_revision="$(docker image inspect wow-sidecar:qualified --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')"
           label_tree="$(docker image inspect wow-sidecar:qualified --format '{{index .Config.Labels "io.sempersupra.wow-sidecar.source-tree"}}')"
           label_bundle="$(docker image inspect wow-sidecar:qualified --format '{{index .Config.Labels "io.sempersupra.wow-sidecar.wheelhouse-bundle"}}')"
+          label_git="$(docker image inspect wow-sidecar:qualified --format '{{index .Config.Labels "io.sempersupra.wow-sidecar.git-package"}}')"
+          label_uid="$(docker image inspect wow-sidecar:qualified --format '{{index .Config.Labels "io.sempersupra.wow-sidecar.runtime-uid"}}')"
+          label_gid="$(docker image inspect wow-sidecar:qualified --format '{{index .Config.Labels "io.sempersupra.wow-sidecar.runtime-gid"}}')"
           test "$label_revision" = "$SOURCE_REVISION"
           test "$label_tree" = "$SOURCE_TREE"
           test "$label_bundle" = "$BUNDLE_DIGEST"
+          test "$label_git" = "$GIT_VERSION"
+          test "$label_uid" = "$RUNTIME_UID"
+          test "$label_gid" = "$RUNTIME_GID"
           docker run --rm --entrypoint wow-sidecar-worker wow-sidecar:qualified --help >/dev/null
 
   publish:
@@ -118,11 +133,14 @@ jobs:
           print("SOURCE_TREE="+shlex.quote(d["source_tree"]))
           print("BASE_IMAGE="+shlex.quote(d["base_image"]))
           print("BUNDLE_DIGEST="+shlex.quote(d["wheelhouse"]["bundle_sha256"]))
+          print("GIT_VERSION="+shlex.quote(d["runtime"]["git_package_version"]))
+          print("RUNTIME_UID="+shlex.quote(str(d["runtime"]["uid"])))
+          print("RUNTIME_GID="+shlex.quote(str(d["runtime"]["gid"])))
           print("IMAGE="+shlex.quote(d["registry"]["repository"]))
           print("TAG="+shlex.quote(d["registry"]["tag"]))
           PY
           )"
-          docker build --pull=false             --build-arg "PYTHON_BASE=$BASE_IMAGE"             --build-arg "WOW_SOURCE_REVISION=$SOURCE_REVISION"             --build-arg "WOW_SOURCE_TREE=$SOURCE_TREE"             --build-arg "WOW_WHEELHOUSE_BUNDLE_SHA256=$BUNDLE_DIGEST"             -f Dockerfile.wheelhouse             -t "$IMAGE:$TAG" .
+          docker build --pull=false             --build-arg "PYTHON_BASE=$BASE_IMAGE"             --build-arg "WOW_SOURCE_REVISION=$SOURCE_REVISION"             --build-arg "WOW_SOURCE_TREE=$SOURCE_TREE"             --build-arg "WOW_WHEELHOUSE_BUNDLE_SHA256=$BUNDLE_DIGEST"             --build-arg "WOW_GIT_VERSION=$GIT_VERSION"             --build-arg "WOW_RUNTIME_UID=$RUNTIME_UID"             --build-arg "WOW_RUNTIME_GID=$RUNTIME_GID"             -f Dockerfile.wheelhouse             -t "$IMAGE:$TAG" .
       - name: Publish immutable source tag or verify existing publication
         shell: bash
         env:
@@ -135,6 +153,9 @@ jobs:
           print("SOURCE_REVISION="+shlex.quote(d["source_revision"]))
           print("SOURCE_TREE="+shlex.quote(d["source_tree"]))
           print("BUNDLE_DIGEST="+shlex.quote(d["wheelhouse"]["bundle_sha256"]))
+          print("GIT_VERSION="+shlex.quote(d["runtime"]["git_package_version"]))
+          print("RUNTIME_UID="+shlex.quote(str(d["runtime"]["uid"])))
+          print("RUNTIME_GID="+shlex.quote(str(d["runtime"]["gid"])))
           print("IMAGE="+shlex.quote(d["registry"]["repository"]))
           print("TAG="+shlex.quote(d["registry"]["tag"]))
           PY
@@ -147,15 +168,30 @@ jobs:
           fi
           digest="$(docker buildx imagetools inspect "$IMAGE:$TAG" --format '{{json .Manifest.Digest}}' | tr -d '"')"
           case "$digest" in sha256:????????????????????????????????????????????????????????????????) ;; *) exit 1;; esac
-          docker pull "$IMAGE@$digest" >/dev/null
-          observed="$(docker run --rm --entrypoint cat "$IMAGE@$digest" /usr/share/wow-sidecar/source-revision)"
+          ref="$IMAGE@$digest"
+          docker pull "$ref" >/dev/null
+          observed="$(docker run --rm --entrypoint cat "$ref" /usr/share/wow-sidecar/source-revision)"
           test "$observed" = "$SOURCE_REVISION"
-          user="$(docker image inspect "$IMAGE@$digest" --format '{{.Config.User}}')"
-          test "$user" = 'wow-sidecar:wow-sidecar'
-          label_revision="$(docker image inspect "$IMAGE@$digest" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')"
-          label_tree="$(docker image inspect "$IMAGE@$digest" --format '{{index .Config.Labels "io.sempersupra.wow-sidecar.source-tree"}}')"
-          label_bundle="$(docker image inspect "$IMAGE@$digest" --format '{{index .Config.Labels "io.sempersupra.wow-sidecar.wheelhouse-bundle"}}')"
+          user="$(docker image inspect "$ref" --format '{{.Config.User}}')"
+          test "$user" = "$RUNTIME_UID:$RUNTIME_GID"
+          docker run --rm --entrypoint /bin/sh "$ref" -ec '
+            test "$(id -u)" = 10001
+            test "$(id -g)" = 10001
+            command -v bash >/dev/null
+            command -v git >/dev/null
+            if command -v gh >/dev/null 2>&1; then exit 2; fi
+            test "$(dpkg-query -W git | cut -f2)" = "1:2.47.3-0+deb13u1"
+          '
+          label_revision="$(docker image inspect "$ref" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')"
+          label_tree="$(docker image inspect "$ref" --format '{{index .Config.Labels "io.sempersupra.wow-sidecar.source-tree"}}')"
+          label_bundle="$(docker image inspect "$ref" --format '{{index .Config.Labels "io.sempersupra.wow-sidecar.wheelhouse-bundle"}}')"
+          label_git="$(docker image inspect "$ref" --format '{{index .Config.Labels "io.sempersupra.wow-sidecar.git-package"}}')"
+          label_uid="$(docker image inspect "$ref" --format '{{index .Config.Labels "io.sempersupra.wow-sidecar.runtime-uid"}}')"
+          label_gid="$(docker image inspect "$ref" --format '{{index .Config.Labels "io.sempersupra.wow-sidecar.runtime-gid"}}')"
           test "$label_revision" = "$SOURCE_REVISION"
           test "$label_tree" = "$SOURCE_TREE"
           test "$label_bundle" = "$BUNDLE_DIGEST"
+          test "$label_git" = "$GIT_VERSION"
+          test "$label_uid" = "$RUNTIME_UID"
+          test "$label_gid" = "$RUNTIME_GID"
           printf 'GHCR-PUBLISHED:%s@%s\n' "$IMAGE" "$digest"

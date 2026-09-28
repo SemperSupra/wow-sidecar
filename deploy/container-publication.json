@@ -1,24 +1,28 @@
 {
-  "schema": "wow-sidecar.container-publication.v1",
+  "schema": "wow-sidecar.container-publication.v2",
   "phase": "candidate-unpublished",
-  "source_revision": "246a7f635c70cf93803b1932ef4129040f6ff458",
-  "published_equivalent_revision": "8c2949691265027acd039fec674787da05c4fd99",
-  "source_tree": "5d43ddcfb8d36748448d8c3bebef0c4abfd12f0f",
+  "source_revision": "58e3936e241e0af072b43928f7b9d4e938912b18",
+  "published_equivalent_revision": "8826acc6ee5d739ba302144dd912798fda7ed424",
+  "source_tree": "94c66182806260a16202982bd8fadb99f1531719",
   "base_image": "python@sha256:f77ac9e44ae96ef2c90b8053ea08c31f8be030f824196b0ae4db6d462c84e51f",
   "wheelhouse": {
-    "release_tag": "wheelhouse-246a7f635c70cf93803b1932ef4129040f6ff458-linux-cp312-x86_64-v1",
-    "asset_name": "wow-sidecar-wheelhouse-246a7f635c70cf93803b1932ef4129040f6ff458-linux-cp312-x86_64.zip",
-    "bundle_sha256": "sha256:ae25ea04cd2ebd49bdf0d3954439811630045c131e4774a27bfc962895239e4b",
-    "manifest_sha256": "sha256:48f300d6ef2b755a5a20d1e17e4979402b8df78048494397b6c8cab8c6f7fe58"
+    "release_tag": "wheelhouse-58e3936e241e0af072b43928f7b9d4e938912b18-linux-cp312-x86_64-v1",
+    "asset_name": "wow-sidecar-wheelhouse-58e3936e241e0af072b43928f7b9d4e938912b18-linux-cp312-x86_64.zip",
+    "bundle_sha256": "sha256:4382af178b0b6e4ddae26bd6706e8e016886c13262aca37ddd782cce70f3d343",
+    "manifest_sha256": "sha256:05e710a9393fe6196d081f3fe27c972035a124e1d735358a50d8b5cf74247921"
   },
   "registry": {
     "repository": "ghcr.io/sempersupra/wow-sidecar",
-    "tag": "source-246a7f635c70cf93803b1932ef4129040f6ff458",
+    "tag": "source-58e3936e241e0af072b43928f7b9d4e938912b18",
     "reference": null
   },
   "runtime": {
-    "user": "wow-sidecar:wow-sidecar",
+    "user": "10001:10001",
+    "uid": 10001,
+    "gid": 10001,
     "revision_file": "/usr/share/wow-sidecar/source-revision",
-    "root_filesystem_compatible_read_only": true
+    "root_filesystem_compatible_read_only": true,
+    "git_package_version": "1:2.47.3-0+deb13u1",
+    "github_cli_required": false
   }
 }

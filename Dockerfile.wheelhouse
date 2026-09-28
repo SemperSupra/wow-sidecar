@@ -5,6 +5,9 @@ FROM ${PYTHON_BASE}
 ARG WOW_SOURCE_REVISION
 ARG WOW_WHEELHOUSE_BUNDLE_SHA256
 ARG WOW_SOURCE_TREE
+ARG WOW_GIT_VERSION=1:2.47.3-0+deb13u1
+ARG WOW_RUNTIME_UID=10001
+ARG WOW_RUNTIME_GID=10001
 
 RUN test -n "$WOW_SOURCE_REVISION" \
     && case "$WOW_SOURCE_REVISION" in (*[!0-9a-f]*|'') exit 2;; esac \
@@ -12,12 +15,25 @@ RUN test -n "$WOW_SOURCE_REVISION" \
     && test -n "$WOW_SOURCE_TREE" \
     && case "$WOW_SOURCE_TREE" in (*[!0-9a-f]*|'') exit 2;; esac \
     && test "${#WOW_SOURCE_TREE}" -eq 40 \
-    && case "$WOW_WHEELHOUSE_BUNDLE_SHA256" in (sha256:????????????????????????????????????????????????????????????????) ;; (*) exit 2;; esac
+    && case "$WOW_WHEELHOUSE_BUNDLE_SHA256" in (sha256:????????????????????????????????????????????????????????????????) ;; (*) exit 2;; esac \
+    && test "$WOW_RUNTIME_UID" = "10001" \
+    && test "$WOW_RUNTIME_GID" = "10001"
 
 LABEL org.opencontainers.image.source="https://github.com/SemperSupra/wow-sidecar" \
       org.opencontainers.image.revision="$WOW_SOURCE_REVISION" \
       io.sempersupra.wow-sidecar.source-tree="$WOW_SOURCE_TREE" \
-      io.sempersupra.wow-sidecar.wheelhouse-bundle="$WOW_WHEELHOUSE_BUNDLE_SHA256"
+      io.sempersupra.wow-sidecar.wheelhouse-bundle="$WOW_WHEELHOUSE_BUNDLE_SHA256" \
+      io.sempersupra.wow-sidecar.git-package="$WOW_GIT_VERSION" \
+      io.sempersupra.wow-sidecar.runtime-uid="$WOW_RUNTIME_UID" \
+      io.sempersupra.wow-sidecar.runtime-gid="$WOW_RUNTIME_GID"
+
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "git=$WOW_GIT_VERSION" \
+    && test "$(dpkg-query -W -f='${Version}' git)" = "$WOW_GIT_VERSION" \
+    && command -v git >/dev/null \
+    && command -v bash >/dev/null \
+    && if command -v gh >/dev/null 2>&1; then echo "GitHub CLI unexpectedly present" >&2; exit 2; fi \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /wheelhouse
 COPY wheelhouse/ /wheelhouse/
@@ -35,14 +51,18 @@ RUN test -f /wheelhouse/manifest.json \
     && printf '%s\n' "$WOW_SOURCE_REVISION" > /usr/share/wow-sidecar/source-revision \
     && cp /wheelhouse/manifest.json /usr/share/wow-sidecar/wheelhouse-manifest.json \
     && cp /wheelhouse/wheelhouse-lock.json /usr/share/wow-sidecar/wheelhouse-lock.json \
+    && printf '%s\n' "git=$WOW_GIT_VERSION" > /usr/share/wow-sidecar/runtime-packages \
     && chmod 0444 \
          /usr/share/wow-sidecar/source-revision \
          /usr/share/wow-sidecar/wheelhouse-manifest.json \
          /usr/share/wow-sidecar/wheelhouse-lock.json \
-    && useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin wow-sidecar \
+         /usr/share/wow-sidecar/runtime-packages \
+    && groupadd --gid "$WOW_RUNTIME_GID" wow-sidecar \
+    && useradd --uid "$WOW_RUNTIME_UID" --gid "$WOW_RUNTIME_GID" --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin wow-sidecar \
+    && install -d -o "$WOW_RUNTIME_UID" -g "$WOW_RUNTIME_GID" -m 0750 /var/lib/wow-sidecar \
     && rm -rf /wheelhouse
 
 WORKDIR /var/lib/wow-sidecar
-USER wow-sidecar:wow-sidecar
+USER 10001:10001
 
 ENTRYPOINT ["wow-sidecar-worker"]
