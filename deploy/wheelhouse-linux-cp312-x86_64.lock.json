@@ -1,6 +1,6 @@
 {
   "schema": "wow-sidecar.wheelhouse-lock.v1",
-  "source_revision": "c83e56d4378853538a4ca8ae7ca56f9763d50fee",
+  "source_revision": "246a7f635c70cf93803b1932ef4129040f6ff458",
   "target": {
     "implementation": "CPython",
     "python": "3.12",
@@ -9,10 +9,10 @@
     "glibc_floor": "2.34"
   },
   "candidate": {
-    "workflow_run_id": 36379398872,
-    "artifact_id": 10952063379,
-    "artifact_name": "wheelhouse-c83e56d4378853538a4ca8ae7ca56f9763d50fee",
-    "manifest_digest": "sha256:68b6fa6c8af4ef62c1d2ca3b9a9ac192bc7b2901edc1d4257321e94044dc78f0"
+    "workflow_run_id": 36381580110,
+    "artifact_id": 10952697781,
+    "artifact_name": "wheelhouse-246a7f635c70cf93803b1932ef4129040f6ff458",
+    "manifest_digest": "sha256:48f300d6ef2b755a5a20d1e17e4979402b8df78048494397b6c8cab8c6f7fe58"
   },
   "wheels": [
     {
@@ -33,7 +33,7 @@
     },
     {
       "filename": "wow_sidecar-0.0.0.dev0-py3-none-any.whl",
-      "sha256": "sha256:0c01fda9aca3f681aa0520f0c14fb9e921fc46b8e4055aa13b6ad6bbd346d2d7"
+      "sha256": "sha256:adf67064e5c63d950a0301083c84e3c40f2bda87a85d67bec8a97036e8e5e871"
     }
   ]
 }
