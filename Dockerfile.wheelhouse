@@ -1,0 +1,48 @@
+# syntax=docker/dockerfile:1
+ARG PYTHON_BASE=python@sha256:f77ac9e44ae96ef2c90b8053ea08c31f8be030f824196b0ae4db6d462c84e51f
+FROM ${PYTHON_BASE}
+
+ARG WOW_SOURCE_REVISION
+ARG WOW_WHEELHOUSE_BUNDLE_SHA256
+ARG WOW_SOURCE_TREE
+
+RUN test -n "$WOW_SOURCE_REVISION" \
+    && case "$WOW_SOURCE_REVISION" in (*[!0-9a-f]*|'') exit 2;; esac \
+    && test "${#WOW_SOURCE_REVISION}" -eq 40 \
+    && test -n "$WOW_SOURCE_TREE" \
+    && case "$WOW_SOURCE_TREE" in (*[!0-9a-f]*|'') exit 2;; esac \
+    && test "${#WOW_SOURCE_TREE}" -eq 40 \
+    && case "$WOW_WHEELHOUSE_BUNDLE_SHA256" in (sha256:????????????????????????????????????????????????????????????????) ;; (*) exit 2;; esac
+
+LABEL org.opencontainers.image.source="https://github.com/SemperSupra/wow-sidecar" \
+      org.opencontainers.image.revision="$WOW_SOURCE_REVISION" \
+      io.sempersupra.wow-sidecar.source-tree="$WOW_SOURCE_TREE" \
+      io.sempersupra.wow-sidecar.wheelhouse-bundle="$WOW_WHEELHOUSE_BUNDLE_SHA256"
+
+WORKDIR /wheelhouse
+COPY wheelhouse/ /wheelhouse/
+
+RUN test -f /wheelhouse/manifest.json \
+    && test -f /wheelhouse/wheelhouse-lock.json \
+    && python -m pip install \
+         --disable-pip-version-check \
+         --no-cache-dir \
+         --no-index \
+         --no-deps \
+         /wheelhouse/*.whl \
+    && wow-sidecar-worker --help >/dev/null \
+    && install -d -m 0755 /usr/share/wow-sidecar \
+    && printf '%s\n' "$WOW_SOURCE_REVISION" > /usr/share/wow-sidecar/source-revision \
+    && cp /wheelhouse/manifest.json /usr/share/wow-sidecar/wheelhouse-manifest.json \
+    && cp /wheelhouse/wheelhouse-lock.json /usr/share/wow-sidecar/wheelhouse-lock.json \
+    && chmod 0444 \
+         /usr/share/wow-sidecar/source-revision \
+         /usr/share/wow-sidecar/wheelhouse-manifest.json \
+         /usr/share/wow-sidecar/wheelhouse-lock.json \
+    && useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin wow-sidecar \
+    && rm -rf /wheelhouse
+
+WORKDIR /var/lib/wow-sidecar
+USER wow-sidecar:wow-sidecar
+
+ENTRYPOINT ["wow-sidecar-worker"]
