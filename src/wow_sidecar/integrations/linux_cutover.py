@@ -16,6 +16,8 @@ CUTOVER_JOURNAL_PATH = "/var/lib/wow-sidecar/cutover.json"
 CANDIDATE_UNIT = "wow-sidecar-worker.service"
 LEGACY_UNITS = (
     "wow-sidecar-host-control.service",
+)
+CORESIDENT_UNITS = (
     "wow-sidecar-stack.service",
 )
 UNIT_RE = re.compile(r"^[A-Za-z0-9_.@:-]+\.service$")
