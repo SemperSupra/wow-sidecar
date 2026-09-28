@@ -117,10 +117,7 @@ class PinnedRepositoryOperatorTests(unittest.TestCase):
             patch.object(operator, "_run", side_effect=runs) as run,
             patch("pathlib.Path.is_file", return_value=True),
             patch("pathlib.Path.is_symlink", return_value=False),
-            patch("pathlib.Path.resolve", side_effect=lambda self=None: Path("/tmp/operator/tools/operator.sh") if self and str(self).endswith("operator.sh") else Path("/tmp/operator")),
         ):
-            # The resolve patch above is intentionally simple; containment is
-            # separately covered by the production normalized relative-path spec.
             result = operator(request())
 
         self.assertEqual(result["result"], "ELIGIBLE")
@@ -176,7 +173,6 @@ class PinnedRepositoryOperatorTests(unittest.TestCase):
             patch.object(operator, "_run", side_effect=runs),
             patch("pathlib.Path.is_file", return_value=True),
             patch("pathlib.Path.is_symlink", return_value=False),
-            patch("pathlib.Path.resolve", side_effect=lambda self=None: Path("/tmp/operator/tools/operator.sh") if self and str(self).endswith("operator.sh") else Path("/tmp/operator")),
         ):
             result = operator(request())
         self.assertEqual(result["result"], "UNKNOWN")
