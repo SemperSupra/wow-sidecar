@@ -1,0 +1,161 @@
+name: WOW Sidecar GHCR image publication
+
+on:
+  pull_request:
+    paths:
+      - 'Dockerfile.wheelhouse'
+      - 'deploy/container-publication.json'
+      - 'deploy/wheelhouse-linux-cp312-x86_64.lock.json'
+      - 'tools/verify-container-publication.py'
+      - '.github/workflows/container-publication.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'Dockerfile.wheelhouse'
+      - 'deploy/container-publication.json'
+      - 'deploy/wheelhouse-linux-cp312-x86_64.lock.json'
+      - 'tools/verify-container-publication.py'
+      - '.github/workflows/container-publication.yml'
+  workflow_dispatch:
+
+jobs:
+  qualify:
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Validate publication descriptor
+        run: python3 tools/verify-container-publication.py deploy/container-publication.json
+      - name: Acquire exact admitted wheelhouse
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          readarray -t fields < <(python3 - <<'PY'
+          import json
+          d=json.load(open("deploy/container-publication.json"))
+          print(d["wheelhouse"]["release_tag"])
+          print(d["wheelhouse"]["asset_name"])
+          print(d["wheelhouse"]["bundle_sha256"])
+          PY
+          )
+          tag="${fields[0]}"
+          asset="${fields[1]}"
+          expected="${fields[2]}"
+          mkdir -p bundle wheelhouse
+          gh release download "$tag" --pattern "$asset" --dir bundle
+          observed="sha256:$(sha256sum "bundle/$asset" | awk '{print $1}')"
+          test "$observed" = "$expected"
+          unzip -q "bundle/$asset" -d wheelhouse
+          python3 .github/scripts/verify-wheelhouse-lock.py             deploy/wheelhouse-linux-cp312-x86_64.lock.json wheelhouse
+      - name: Build and verify offline image candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          eval "$(python3 - <<'PY'
+          import json, shlex
+          d=json.load(open("deploy/container-publication.json"))
+          print("SOURCE_REVISION="+shlex.quote(d["source_revision"]))
+          print("SOURCE_TREE="+shlex.quote(d["source_tree"]))
+          print("BASE_IMAGE="+shlex.quote(d["base_image"]))
+          print("BUNDLE_DIGEST="+shlex.quote(d["wheelhouse"]["bundle_sha256"]))
+          PY
+          )"
+          docker build --pull=false             --build-arg "PYTHON_BASE=$BASE_IMAGE"             --build-arg "WOW_SOURCE_REVISION=$SOURCE_REVISION"             --build-arg "WOW_SOURCE_TREE=$SOURCE_TREE"             --build-arg "WOW_WHEELHOUSE_BUNDLE_SHA256=$BUNDLE_DIGEST"             -f Dockerfile.wheelhouse             -t wow-sidecar:qualified .
+          observed="$(docker run --rm --entrypoint cat wow-sidecar:qualified /usr/share/wow-sidecar/source-revision)"
+          test "$observed" = "$SOURCE_REVISION"
+          user="$(docker image inspect wow-sidecar:qualified --format '{{.Config.User}}')"
+          test "$user" = 'wow-sidecar:wow-sidecar'
+          label_revision="$(docker image inspect wow-sidecar:qualified --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')"
+          label_tree="$(docker image inspect wow-sidecar:qualified --format '{{index .Config.Labels "io.sempersupra.wow-sidecar.source-tree"}}')"
+          label_bundle="$(docker image inspect wow-sidecar:qualified --format '{{index .Config.Labels "io.sempersupra.wow-sidecar.wheelhouse-bundle"}}')"
+          test "$label_revision" = "$SOURCE_REVISION"
+          test "$label_tree" = "$SOURCE_TREE"
+          test "$label_bundle" = "$BUNDLE_DIGEST"
+          docker run --rm --entrypoint wow-sidecar-worker wow-sidecar:qualified --help >/dev/null
+
+  publish:
+    if: github.event_name == 'push'
+    needs: qualify
+    permissions:
+      contents: read
+      packages: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Acquire exact admitted wheelhouse
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          eval "$(python3 - <<'PY'
+          import json, shlex
+          d=json.load(open("deploy/container-publication.json"))
+          print("TAG="+shlex.quote(d["wheelhouse"]["release_tag"]))
+          print("ASSET="+shlex.quote(d["wheelhouse"]["asset_name"]))
+          print("EXPECTED="+shlex.quote(d["wheelhouse"]["bundle_sha256"]))
+          PY
+          )"
+          mkdir -p bundle wheelhouse
+          gh release download "$TAG" --pattern "$ASSET" --dir bundle
+          observed="sha256:$(sha256sum "bundle/$ASSET" | awk '{print $1}')"
+          test "$observed" = "$EXPECTED"
+          unzip -q "bundle/$ASSET" -d wheelhouse
+          python3 .github/scripts/verify-wheelhouse-lock.py             deploy/wheelhouse-linux-cp312-x86_64.lock.json wheelhouse
+      - name: Build exact publication image
+        shell: bash
+        run: |
+          set -euo pipefail
+          eval "$(python3 - <<'PY'
+          import json, shlex
+          d=json.load(open("deploy/container-publication.json"))
+          print("SOURCE_REVISION="+shlex.quote(d["source_revision"]))
+          print("SOURCE_TREE="+shlex.quote(d["source_tree"]))
+          print("BASE_IMAGE="+shlex.quote(d["base_image"]))
+          print("BUNDLE_DIGEST="+shlex.quote(d["wheelhouse"]["bundle_sha256"]))
+          print("IMAGE="+shlex.quote(d["registry"]["repository"]))
+          print("TAG="+shlex.quote(d["registry"]["tag"]))
+          PY
+          )"
+          docker build --pull=false             --build-arg "PYTHON_BASE=$BASE_IMAGE"             --build-arg "WOW_SOURCE_REVISION=$SOURCE_REVISION"             --build-arg "WOW_SOURCE_TREE=$SOURCE_TREE"             --build-arg "WOW_WHEELHOUSE_BUNDLE_SHA256=$BUNDLE_DIGEST"             -f Dockerfile.wheelhouse             -t "$IMAGE:$TAG" .
+      - name: Publish immutable source tag or verify existing publication
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          eval "$(python3 - <<'PY'
+          import json, shlex
+          d=json.load(open("deploy/container-publication.json"))
+          print("SOURCE_REVISION="+shlex.quote(d["source_revision"]))
+          print("SOURCE_TREE="+shlex.quote(d["source_tree"]))
+          print("BUNDLE_DIGEST="+shlex.quote(d["wheelhouse"]["bundle_sha256"]))
+          print("IMAGE="+shlex.quote(d["registry"]["repository"]))
+          print("TAG="+shlex.quote(d["registry"]["tag"]))
+          PY
+          )"
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          if docker manifest inspect "$IMAGE:$TAG" >/dev/null 2>&1; then
+            echo "source tag already exists; refusing overwrite and verifying existing image"
+          else
+            docker push "$IMAGE:$TAG"
+          fi
+          digest="$(docker buildx imagetools inspect "$IMAGE:$TAG" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          case "$digest" in sha256:????????????????????????????????????????????????????????????????) ;; *) exit 1;; esac
+          docker pull "$IMAGE@$digest" >/dev/null
+          observed="$(docker run --rm --entrypoint cat "$IMAGE@$digest" /usr/share/wow-sidecar/source-revision)"
+          test "$observed" = "$SOURCE_REVISION"
+          user="$(docker image inspect "$IMAGE@$digest" --format '{{.Config.User}}')"
+          test "$user" = 'wow-sidecar:wow-sidecar'
+          label_revision="$(docker image inspect "$IMAGE@$digest" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')"
+          label_tree="$(docker image inspect "$IMAGE@$digest" --format '{{index .Config.Labels "io.sempersupra.wow-sidecar.source-tree"}}')"
+          label_bundle="$(docker image inspect "$IMAGE@$digest" --format '{{index .Config.Labels "io.sempersupra.wow-sidecar.wheelhouse-bundle"}}')"
+          test "$label_revision" = "$SOURCE_REVISION"
+          test "$label_tree" = "$SOURCE_TREE"
+          test "$label_bundle" = "$BUNDLE_DIGEST"
+          printf 'GHCR-PUBLISHED:%s@%s\n' "$IMAGE" "$digest"
