@@ -75,7 +75,7 @@ jobs:
             command -v bash >/dev/null
             command -v git >/dev/null
             if command -v gh >/dev/null 2>&1; then exit 2; fi
-            test "$(dpkg-query -W -f='${Version}' git)" = "1:2.47.3-0+deb13u1"
+            test "$(dpkg-query -W git | awk '{print $2}')" = "1:2.47.3-0+deb13u1"
             test "$(cat /usr/share/wow-sidecar/runtime-packages)" = "git=1:2.47.3-0+deb13u1"
           '
           label_revision="$(docker image inspect wow-sidecar:qualified --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')"
@@ -180,7 +180,7 @@ jobs:
             command -v bash >/dev/null
             command -v git >/dev/null
             if command -v gh >/dev/null 2>&1; then exit 2; fi
-            test "$(dpkg-query -W -f='${Version}' git)" = "1:2.47.3-0+deb13u1"
+            test "$(dpkg-query -W git | awk '{print $2}')" = "1:2.47.3-0+deb13u1"
           '
           label_revision="$(docker image inspect "$ref" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')"
           label_tree="$(docker image inspect "$ref" --format '{{index .Config.Labels "io.sempersupra.wow-sidecar.source-tree"}}')"
