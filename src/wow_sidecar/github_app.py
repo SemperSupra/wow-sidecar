@@ -144,7 +144,7 @@ class GitHubAppClient:
             "POST",
             f"/app/installations/{installation_id}/access_tokens",
             token=self.app_jwt(),
-            body={},
+            body={"repositories": [repository.split("/", 1)[1]]},
             opener=active_opener,
         )
         token = value.get("token")
