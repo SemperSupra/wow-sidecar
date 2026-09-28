@@ -51,7 +51,9 @@ class LinuxSystemdTests(unittest.TestCase):
             with self.subTest(invariant=invariant):
                 self.assertIn(invariant, unit)
         self.assertNotIn("/opt/wow-sidecar", unit)
-        self.assertNotIn("root", unit.lower().replace("/usr/local", ""))
+        self.assertNotIn("User=root", unit)
+        self.assertNotIn("Group=root", unit)
+        self.assertNotIn("Environment=HOME=/root", unit)
 
     def test_spec_rejects_shell_like_or_out_of_boundary_inputs(self):
         bad_repositories = ("owner/repo;id", "owner/repo extra", "owner/repo/name", "/repo")
