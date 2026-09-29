@@ -50,4 +50,6 @@ Domain-specific scheduling, application lifecycle policy, or product authority r
 
 ## Status
 
-Product extraction and qualification are in progress. No compatibility or installation claim should be inferred until a corresponding public release is published.
+Generic extraction and public-safe non-live qualification are complete through the protocol/runtime, bounded integrations, immutable App-native artifact, and public TrueNAS App render. The historical Agent Dispatch implementation remains the admitted live compatibility bridge while private TrueNAS HIL and state-preserving cutover/rollback remain pending.
+
+No live installation, migration, cutover, or private-HIL claim should be inferred from the public render/artifact evidence alone.
