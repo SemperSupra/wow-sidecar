@@ -1,0 +1,60 @@
+name: WOW Sidecar Go conformance
+
+on:
+  pull_request:
+    paths:
+      - 'go.mod'
+      - 'go/**'
+      - 'conformance/**'
+      - 'tests/test_conformance_vectors.py'
+      - 'docs/go-protocol-conformance.md'
+      - '.github/workflows/go-conformance.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  conformance:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+      - name: Public-safety projection guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          surfaces=(go conformance tests/test_conformance_vectors.py docs/go-protocol-conformance.md)
+          if grep -R -n -E 'agent-dispatch-private|agent-dispatch-execution-control-private|truenas-app-foundry-private|garm-provider-truenas-private|wow-sidecar-private' "${surfaces[@]}"; then
+            echo 'private repository identifier found in public Go/conformance surface' >&2
+            exit 1
+          fi
+          if grep -R -n -E -- '-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----' "${surfaces[@]}"; then
+            echo 'private key material found in public Go/conformance surface' >&2
+            exit 1
+          fi
+      - name: Run Python oracle vectors
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check -e .
+          python -m unittest -v tests.test_conformance_vectors
+      - name: Run Go conformance
+        shell: bash
+        run: |
+          set -euo pipefail
+          go version
+          go vet ./go/...
+          go test ./go/...
+      - name: Cross-compile protocol tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/wow-go
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test -c -o /tmp/wow-go/protocol-amd64.test ./go/protocol
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go test -c -o /tmp/wow-go/protocol-arm64.test ./go/protocol
+          test -s /tmp/wow-go/protocol-amd64.test
+          test -s /tmp/wow-go/protocol-arm64.test
