@@ -6,7 +6,7 @@ on:
       - 'go.mod'
       - 'go/**'
       - 'cmd/wow-sidecar/**'
-      - 'Dockerfile.go'
+      - 'Dockerfile.wow-go'
       - '.github/workflows/go-container-candidate.yml'
   workflow_dispatch:
 
@@ -44,7 +44,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          surfaces=(go cmd/wow-sidecar Dockerfile.go)
+          surfaces=(go cmd/wow-sidecar Dockerfile.wow-go)
           if grep -R -n -E 'agent-dispatch-private|agent-dispatch-execution-control-private|truenas-app-foundry-private|garm-provider-truenas-private|wow-sidecar-private' "${surfaces[@]}"; then
             echo 'private repository identifier found in public Go runtime surface' >&2
             exit 1
@@ -92,7 +92,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          docker build             -f Dockerfile.go             --build-arg TARGETARCH=amd64             --build-arg WOW_SOURCE_REVISION="$CANDIDATE_SHA"             --build-arg WOW_BUILD_VERSION="$BUILD_VERSION"             -t wow-sidecar-go:amd64 .
+          docker build             -f Dockerfile.wow-go             --build-arg TARGETARCH=amd64             --build-arg WOW_SOURCE_REVISION="$CANDIDATE_SHA"             --build-arg WOW_BUILD_VERSION="$BUILD_VERSION"             -t wow-sidecar-go:amd64 .
           test "$(docker image inspect wow-sidecar-go:amd64 --format '{{.Config.User}}')" = '65532:65532'
           set +e
           docker run --rm --entrypoint /bin/sh wow-sidecar-go:amd64 -c true >/tmp/wow-shell.out 2>&1
@@ -137,7 +137,7 @@ jobs:
           set -euo pipefail
           docker buildx version
           oci="$RUNNER_TEMP/wow-sidecar-go.oci"
-          docker buildx build             --platform linux/amd64,linux/arm64             -f Dockerfile.go             --build-arg WOW_SOURCE_REVISION="$CANDIDATE_SHA"             --build-arg WOW_BUILD_VERSION="$BUILD_VERSION"             --output "type=oci,dest=$oci" .
+          docker buildx build             --platform linux/amd64,linux/arm64             -f Dockerfile.wow-go             --build-arg WOW_SOURCE_REVISION="$CANDIDATE_SHA"             --build-arg WOW_BUILD_VERSION="$BUILD_VERSION"             --output "type=oci,dest=$oci" .
           layout="$RUNNER_TEMP/wow-sidecar-oci-layout"
           mkdir -p "$layout"
           tar -xf "$oci" -C "$layout"
