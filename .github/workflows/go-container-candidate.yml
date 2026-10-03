@@ -161,12 +161,47 @@ jobs:
           mkdir -p "$layout"
           tar -xf "$oci" -C "$layout"
           jq . "$layout/index.json"
-          mapfile -t platforms < <(
-            jq -r '.manifests[].platform | select(.os == "linux") | "\(.os)/\(.architecture)"' "$layout/index.json" | sort -u
-          )
-          test "${#platforms[@]}" -eq 2
-          test "${platforms[0]}" = 'linux/amd64'
-          test "${platforms[1]}" = 'linux/arm64'
+          python3 - "$layout" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          root = pathlib.Path(sys.argv[1])
+          index_media_types = {
+              "application/vnd.oci.image.index.v1+json",
+              "application/vnd.docker.distribution.manifest.list.v2+json",
+          }
+          platforms = set()
+
+          def load_blob(digest: str):
+              algorithm, value = digest.split(":", 1)
+              if algorithm != "sha256" or len(value) != 64:
+                  raise SystemExit(f"unsupported OCI descriptor digest: {digest}")
+              return json.loads((root / "blobs" / algorithm / value).read_text())
+
+          def visit(index):
+              manifests = index.get("manifests")
+              if not isinstance(manifests, list):
+                  raise SystemExit("OCI index manifests must be an array")
+              for descriptor in manifests:
+                  platform = descriptor.get("platform")
+                  if isinstance(platform, dict) and platform.get("os") and platform.get("architecture"):
+                      platforms.add(f"{platform['os']}/{platform['architecture']}")
+                      continue
+                  if descriptor.get("mediaType") in index_media_types:
+                      visit(load_blob(descriptor["digest"]))
+                      continue
+                  raise SystemExit(
+                      "OCI descriptor has neither platform nor nested index: "
+                      + json.dumps(descriptor, sort_keys=True)
+                  )
+
+          visit(json.loads((root / "index.json").read_text()))
+          expected = {"linux/amd64", "linux/arm64"}
+          print("platforms=" + ",".join(sorted(platforms)))
+          if platforms != expected:
+              raise SystemExit(f"unexpected OCI platforms: {sorted(platforms)}")
+          PY
           sha256sum "$oci"
           trap - EXIT
           cleanup_builder
