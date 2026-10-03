@@ -1,7 +1,6 @@
 package node
 
 import (
-	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -16,25 +15,7 @@ import (
 	"github.com/SemperSupra/wow-sidecar/go/protocol"
 )
 
-var sourceRevisionRE = regexp.MustCompile(`^[0-9a-f]{40}package node
-
-import (
-	"encoding/json"
-	"fmt"
-	"net"
-	"net/http"
-	"net/url"
-	"os"
-	"regexp"
-	"strconv"
-	"strings"
-	"time"
-
-	"github.com/SemperSupra/wow-sidecar/go/embodiment"
-	"github.com/SemperSupra/wow-sidecar/go/protocol"
-)
-
-)
+var sourceRevisionRE = regexp.MustCompile("^[0-9a-f]{40}$")
 
 const (
 	defaultGenerationStateFile = "/var/lib/wow-sidecar/generation.json"
@@ -55,12 +36,12 @@ type Config struct {
 }
 
 type Runtime struct {
-	config         Config
-	generation     uint64
-	incarnationID string
-	sourceRevision string
-	buildVersion   string
-	now            func() time.Time
+	config          Config
+	generation      uint64
+	incarnationID   string
+	sourceRevision  string
+	buildVersion    string
+	now             func() time.Time
 }
 
 func ConfigFromEnv() (Config, error) {
@@ -115,14 +96,14 @@ func ConfigFromEnv() (Config, error) {
 	}
 
 	return Config{
-		NodeID: nodeID,
-		Locality: locality,
+		NodeID:              nodeID,
+		Locality:            locality,
 		GenerationStateFile: stateFile,
-		ListenAddr: listenAddr,
-		LeaseTTL: leaseTTL,
-		PublicEndpoint: publicEndpoint,
-		EndpointKind: endpointKind,
-		EndpointAuth: endpointAuth,
+		ListenAddr:          listenAddr,
+		LeaseTTL:            leaseTTL,
+		PublicEndpoint:      publicEndpoint,
+		EndpointKind:        endpointKind,
+		EndpointAuth:        endpointAuth,
 	}, nil
 }
 
@@ -155,12 +136,12 @@ func newRuntime(config Config, sourceRevision, buildVersion string, now func() t
 		return nil, err
 	}
 	runtime := &Runtime{
-		config: config,
-		generation: generation,
-		incarnationID: incarnationID,
-		sourceRevision: sourceRevision,
-		buildVersion: buildVersion,
-		now: now,
+		config:          config,
+		generation:      generation,
+		incarnationID:   incarnationID,
+		sourceRevision:  sourceRevision,
+		buildVersion:    buildVersion,
+		now:             now,
 	}
 	if _, err := runtime.Card(); err != nil {
 		return nil, err
@@ -175,20 +156,20 @@ func (r *Runtime) Card() (embodiment.Card, error) {
 	endpoints := []embodiment.Endpoint{}
 	if r.config.PublicEndpoint != "" {
 		endpoints = append(endpoints, embodiment.Endpoint{
-			Kind: r.config.EndpointKind,
+			Kind:    r.config.EndpointKind,
 			Address: r.config.PublicEndpoint,
-			Auth: r.config.EndpointAuth,
+			Auth:    r.config.EndpointAuth,
 		})
 	}
 	card := embodiment.Card{
-		Schema: embodiment.CardSchema,
-		Protocol: embodiment.ProtocolVersion,
-		NodeID: r.config.NodeID,
-		Generation: r.generation,
-		IncarnationID: r.incarnationID,
-		Locality: r.config.Locality,
-		Endpoints: endpoints,
-		Capabilities: append([]string(nil), r.config.Capabilities...),
+		Schema:         embodiment.CardSchema,
+		Protocol:       embodiment.ProtocolVersion,
+		NodeID:         r.config.NodeID,
+		Generation:     r.generation,
+		IncarnationID:  r.incarnationID,
+		Locality:       r.config.Locality,
+		Endpoints:      endpoints,
+		Capabilities:   append([]string(nil), r.config.Capabilities...),
 		LeaseExpiresAt: r.now().UTC().Add(r.config.LeaseTTL).Format(time.RFC3339Nano),
 	}
 	if err := card.Validate(); err != nil {
@@ -222,8 +203,7 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_, _ = w.Write(append(raw, '
-'))
+	_, _ = w.Write(append(raw, '\n'))
 }
 
 func (r *Runtime) handleHealth(w http.ResponseWriter, req *http.Request) {
@@ -231,12 +211,12 @@ func (r *Runtime) handleHealth(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status": "ok",
-		"node_id": r.config.NodeID,
-		"generation": r.generation,
-		"incarnation_id": r.incarnationID,
+		"status":          "ok",
+		"node_id":         r.config.NodeID,
+		"generation":      r.generation,
+		"incarnation_id":  r.incarnationID,
 		"source_revision": r.sourceRevision,
-		"build_version": r.buildVersion,
+		"build_version":   r.buildVersion,
 	})
 }
 
@@ -255,9 +235,9 @@ func (r *Runtime) handleReady(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status": "ready",
-		"node_id": card.NodeID,
-		"generation": card.Generation,
+		"status":      "ready",
+		"node_id":     card.NodeID,
+		"generation":  card.Generation,
 		"card_digest": digest,
 	})
 }
@@ -280,17 +260,9 @@ func (r *Runtime) ListenAddr() string {
 
 func (r *Runtime) VersionDocument() map[string]any {
 	return map[string]any{
-		"product": "wow-sidecar",
+		"product":         "wow-sidecar",
 		"source_revision": r.sourceRevision,
-		"build_version": r.buildVersion,
-		"go_runtime": "static",
+		"build_version":   r.buildVersion,
+		"go_runtime":      "static",
 	}
-}
-
-func DecodeGenerationState(raw []byte) (map[string]any, error) {
-	var value map[string]any
-	if err := json.Unmarshal(raw, &value); err != nil {
-		return nil, err
-	}
-	return value, nil
 }
