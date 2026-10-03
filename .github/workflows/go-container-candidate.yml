@@ -136,16 +136,36 @@ jobs:
         run: |
           set -euo pipefail
           docker buildx version
+          builder='wow-sidecar-oci'
+          docker buildx rm -f "$builder" >/dev/null 2>&1 || true
+          docker buildx create --name "$builder" --driver docker-container --use >/dev/null
+          cleanup_builder() { docker buildx rm -f "$builder" >/dev/null 2>&1 || true; }
+          trap cleanup_builder EXIT
+          docker buildx inspect --bootstrap
+
+          builder_container="$(docker ps -q --filter "name=buildx_buildkit_${builder}0" | head -n1)"
+          test -n "$builder_container"
+          builder_image_id="$(docker inspect --format '{{.Image}}' "$builder_container")"
+          printf 'buildkit_container=%s\nbuildkit_image_id=%s\n' "$builder_container" "$builder_image_id"
+          docker image inspect "$builder_image_id" --format 'buildkit_repo_digests={{json .RepoDigests}}'
+
           oci="$RUNNER_TEMP/wow-sidecar-go.oci"
-          docker buildx build             --platform linux/amd64,linux/arm64             -f Dockerfile.wow-go             --build-arg WOW_SOURCE_REVISION="$CANDIDATE_SHA"             --build-arg WOW_BUILD_VERSION="$BUILD_VERSION"             --output "type=oci,dest=$oci" .
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            -f Dockerfile.wow-go \
+            --build-arg WOW_SOURCE_REVISION="$CANDIDATE_SHA" \
+            --build-arg WOW_BUILD_VERSION="$BUILD_VERSION" \
+            --output "type=oci,dest=$oci" .
           layout="$RUNNER_TEMP/wow-sidecar-oci-layout"
           mkdir -p "$layout"
           tar -xf "$oci" -C "$layout"
           jq . "$layout/index.json"
           mapfile -t platforms < <(
-            jq -r '.manifests[].platform | "\(.os)/\(.architecture)"' "$layout/index.json" | sort
+            jq -r '.manifests[].platform | select(.os == "linux") | "\(.os)/\(.architecture)"' "$layout/index.json" | sort -u
           )
           test "${#platforms[@]}" -eq 2
           test "${platforms[0]}" = 'linux/amd64'
           test "${platforms[1]}" = 'linux/arm64'
           sha256sum "$oci"
+          trap - EXIT
+          cleanup_builder
