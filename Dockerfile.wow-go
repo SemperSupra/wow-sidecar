@@ -1,0 +1,20 @@
+# syntax=docker/dockerfile:1.7
+FROM scratch
+
+ARG TARGETARCH
+ARG WOW_SOURCE_REVISION
+ARG WOW_BUILD_VERSION
+
+LABEL org.opencontainers.image.title="WOW Sidecar" \
+      org.opencontainers.image.revision="$WOW_SOURCE_REVISION" \
+      org.opencontainers.image.version="$WOW_BUILD_VERSION"
+
+COPY build/go-container/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY build/go-container/${TARGETARCH}/wow-sidecar /wow-sidecar
+
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+
+USER 65532:65532
+EXPOSE 8080
+
+ENTRYPOINT ["/wow-sidecar"]
