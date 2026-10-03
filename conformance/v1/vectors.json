@@ -1,0 +1,250 @@
+{
+  "schema": "wow-sidecar.conformance.v1",
+  "oracle_revision": "17e2be6faefdf7efbfea0bd97d790269ee8b377c",
+  "request_vectors": [
+    {
+      "id": "valid-minimal",
+      "value": {
+        "schema": "agent-dispatch.host-operator-request.v1",
+        "request_id": "synthetic-proof-001",
+        "operator_profile": "synthetic-proof",
+        "operator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "authority": {
+          "record": "github-issue-comment:ExampleOrg/authority#7:11",
+          "revision": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "state": "open"
+        },
+        "inputs": {},
+        "constraints": {
+          "no_retry": true,
+          "promotion_performed": false,
+          "release_performed": false
+        }
+      },
+      "accept": true
+    },
+    {
+      "id": "reject-extra-top-level-field",
+      "mutate": {
+        "add_top_level": [
+          "command",
+          "whoami"
+        ]
+      },
+      "base": "valid-minimal",
+      "accept": false,
+      "error_contains": "fields do not match"
+    },
+    {
+      "id": "reject-short-request-id",
+      "mutate": {
+        "set": [
+          "request_id",
+          "x"
+        ]
+      },
+      "base": "valid-minimal",
+      "accept": false,
+      "error_contains": "request_id"
+    },
+    {
+      "id": "reject-nonsha-operator-revision",
+      "mutate": {
+        "set": [
+          "operator_revision",
+          "latest"
+        ]
+      },
+      "base": "valid-minimal",
+      "accept": false,
+      "error_contains": "40-hex"
+    },
+    {
+      "id": "reject-nonsha-authority-revision",
+      "mutate": {
+        "set": [
+          "authority.revision",
+          "latest"
+        ]
+      },
+      "base": "valid-minimal",
+      "accept": false,
+      "error_contains": "authority.revision"
+    },
+    {
+      "id": "reject-closed-authority",
+      "mutate": {
+        "set": [
+          "authority.state",
+          "closed"
+        ]
+      },
+      "base": "valid-minimal",
+      "accept": false,
+      "error_contains": "must be open"
+    },
+    {
+      "id": "reject-retry-authorized",
+      "mutate": {
+        "set": [
+          "constraints.no_retry",
+          false
+        ]
+      },
+      "base": "valid-minimal",
+      "accept": false,
+      "error_contains": "no_retry"
+    },
+    {
+      "id": "reject-promotion-performed",
+      "mutate": {
+        "set": [
+          "constraints.promotion_performed",
+          true
+        ]
+      },
+      "base": "valid-minimal",
+      "accept": false,
+      "error_contains": "promotion_performed"
+    },
+    {
+      "id": "reject-release-performed",
+      "mutate": {
+        "set": [
+          "constraints.release_performed",
+          true
+        ]
+      },
+      "base": "valid-minimal",
+      "accept": false,
+      "error_contains": "release_performed"
+    }
+  ],
+  "profile_vectors": [
+    {
+      "id": "valid-pinned-repository",
+      "value": {
+        "schema": "wow-sidecar.operator-profile.v1",
+        "profile": "fixed-operator",
+        "authority": {
+          "record": "github-issue-comment:ExampleOrg/authority#7:11",
+          "revision": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "state": "open"
+        },
+        "operator": {
+          "kind": "pinned-repository",
+          "repository": "ExampleOrg/operator-repo",
+          "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "operator_path": "tools/operator.sh",
+          "require_main_revision": true,
+          "environment": {
+            "FIXED_MODE": "1"
+          }
+        }
+      },
+      "accept": true
+    },
+    {
+      "id": "reject-command-field",
+      "base": "valid-pinned-repository",
+      "mutate": {
+        "add": [
+          "operator.command",
+          "bash -c whoami"
+        ]
+      },
+      "accept": false,
+      "error_contains": "fields do not match"
+    },
+    {
+      "id": "reject-shell-kind",
+      "base": "valid-pinned-repository",
+      "mutate": {
+        "set": [
+          "operator.kind",
+          "shell"
+        ]
+      },
+      "accept": false,
+      "error_contains": "unsupported operator kind"
+    },
+    {
+      "id": "reject-profile-closed-authority",
+      "base": "valid-pinned-repository",
+      "mutate": {
+        "set": [
+          "authority.state",
+          "closed"
+        ]
+      },
+      "accept": false,
+      "error_contains": "must be open"
+    },
+    {
+      "id": "reject-profile-latest-authority",
+      "base": "valid-pinned-repository",
+      "mutate": {
+        "set": [
+          "authority.revision",
+          "latest"
+        ]
+      },
+      "accept": false,
+      "error_contains": "sha256"
+    }
+  ],
+  "canonical_vectors": [
+    {
+      "id": "sorted-compact-utf8",
+      "value": {
+        "z": 1,
+        "a": {
+          "d": 4,
+          "b": 2
+        },
+        "unicode": "é"
+      },
+      "canonical_json": "{\"a\":{\"b\":2,\"d\":4},\"unicode\":\"é\",\"z\":1}"
+    }
+  ],
+  "receipt_vectors": [
+    {
+      "id": "eligible-receipt-fixed-safety-flags",
+      "args": {
+        "request_id": "synthetic-proof-001",
+        "request_sha": "1111111111111111111111111111111111111111",
+        "result": "ELIGIBLE",
+        "status": "proof-ready",
+        "operator_profile": "synthetic-proof",
+        "operator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "authority_record": "github-issue-comment:ExampleOrg/authority#7:11",
+        "authority_revision": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "authority_state": "open",
+        "mutation_state": false,
+        "details": {
+          "authority_verified": true
+        }
+      },
+      "expected": {
+        "schema": "agent-dispatch.host-operator-receipt.v1",
+        "request_id": "synthetic-proof-001",
+        "request_commit_sha": "1111111111111111111111111111111111111111",
+        "claim_ref": "refs/heads/claims/synthetic-proof-001",
+        "operator_profile": "synthetic-proof",
+        "operator_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "authority_record": "github-issue-comment:ExampleOrg/authority#7:11",
+        "authority_revision": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "authority_state": "open",
+        "result": "ELIGIBLE",
+        "status": "proof-ready",
+        "workspace_mutation_performed": false,
+        "retry_authorized": false,
+        "promotion_performed": false,
+        "release_performed": false,
+        "details": {
+          "authority_verified": true
+        }
+      }
+    }
+  ]
+}
