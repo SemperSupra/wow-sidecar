@@ -1,0 +1,156 @@
+name: WOW Sidecar peer federation qualification
+
+on:
+  pull_request:
+    paths:
+      - 'go/**'
+      - 'cmd/wow-sidecar/**'
+      - '.github/workflows/go-peer-federation.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GOTOOLCHAIN: local
+
+jobs:
+  unit-race:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: '1.24.13'
+          check-latest: false
+      - name: Static and race qualification
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain)"
+          go vet ./...
+          go test ./...
+          go test -race ./go/federation ./go/node
+
+  two-node:
+    needs: unit-race
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: '1.24.13'
+          check-latest: false
+
+      - name: Build exact daemon
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          version="0.0.0-dev.${sha:0:12}"
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64             go build -mod=readonly -trimpath -buildvcs=false             -ldflags="-s -w -X main.sourceRevision=$sha -X main.buildVersion=$version"             -o "$RUNNER_TEMP/wow-sidecar" ./cmd/wow-sidecar
+          "$RUNNER_TEMP/wow-sidecar" version | jq -e --arg sha "$sha" '.source_revision == $sha'
+          printf 'sha=%s\n' "$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Two-node partition and re-embodiment rep
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="$RUNNER_TEMP/wow-sidecar"
+          a_state="$RUNNER_TEMP/wow-a"
+          b_state="$RUNNER_TEMP/wow-b"
+          mkdir -p "$a_state" "$b_state"
+
+          a_pid=''
+          b_pid=''
+          cleanup() {
+            if [ -n "$a_pid" ]; then kill "$a_pid" >/dev/null 2>&1 || true; fi
+            if [ -n "$b_pid" ]; then kill "$b_pid" >/dev/null 2>&1 || true; fi
+          }
+          trap cleanup EXIT
+
+          start_a() {
+            WOW_NODE_ID=sovereign-test-01             WOW_LOCALITY=sovereign             WOW_GENERATION_STATE_FILE="$a_state/generation.json"             WOW_LISTEN_ADDR=127.0.0.1:18101             WOW_LEASE_SECONDS=15             WOW_PEER_URLS=http://127.0.0.1:18102             WOW_PEER_POLL_SECONDS=5               "$bin" >"$a_state/stdout.log" 2>"$a_state/stderr.log" &
+            a_pid=$!
+          }
+
+          start_b() {
+            WOW_NODE_ID=cloud-test-01             WOW_LOCALITY=cloud             WOW_GENERATION_STATE_FILE="$b_state/generation.json"             WOW_LISTEN_ADDR=127.0.0.1:18102             WOW_LEASE_SECONDS=15             WOW_PEER_URLS=http://127.0.0.1:18101             WOW_PEER_POLL_SECONDS=5               "$bin" >"$b_state/stdout.log" 2>"$b_state/stderr.log" &
+            b_pid=$!
+          }
+
+          wait_json() {
+            url="$1"
+            expression="$2"
+            out="$3"
+            for attempt in $(seq 1 40); do
+              if curl --fail --silent "$url" >"$out" && jq -e "$expression" "$out" >/dev/null; then
+                return 0
+              fi
+              sleep 1
+            done
+            echo "timed out waiting for $url / $expression" >&2
+            cat "$out" >&2 2>/dev/null || true
+            return 1
+          }
+
+          start_a
+          start_b
+
+          wait_json http://127.0.0.1:18101/healthz '.status == "ok" and .generation == 1' "$RUNNER_TEMP/a-health.json"
+          wait_json http://127.0.0.1:18102/healthz '.status == "ok" and .generation == 1' "$RUNNER_TEMP/b-health.json"
+
+          wait_json http://127.0.0.1:18101/v1/peers             '.configured_peers == 1 and .observed_peers == 1 and
+             .peers[0].node_id == "cloud-test-01" and
+             .peers[0].generation == 1 and
+             .peers[0].status == "OBSERVED" and
+             .peers[0].reachability == "REACHABLE" and
+             .peers[0].presence == "ONLINE"'             "$RUNNER_TEMP/a-peers-initial.json"
+
+          wait_json http://127.0.0.1:18102/v1/peers             '.configured_peers == 1 and .observed_peers == 1 and
+             .peers[0].node_id == "sovereign-test-01" and
+             .peers[0].generation == 1 and
+             .peers[0].status == "OBSERVED" and
+             .peers[0].reachability == "REACHABLE" and
+             .peers[0].presence == "ONLINE"'             "$RUNNER_TEMP/b-peers-initial.json"
+
+          kill "$b_pid"
+          wait "$b_pid" || true
+          b_pid=''
+
+          wait_json http://127.0.0.1:18101/v1/peers             '.peers[0].node_id == "cloud-test-01" and
+             .peers[0].status == "FETCH_FAILED" and
+             .peers[0].reachability == "UNREACHABLE" and
+             (.peers[0].presence == "DEGRADED" or .peers[0].presence == "OFFLINE")'             "$RUNNER_TEMP/a-peers-partitioned.json"
+
+          start_b
+          wait_json http://127.0.0.1:18102/healthz '.status == "ok" and .generation == 2' "$RUNNER_TEMP/b-health-restarted.json"
+
+          wait_json http://127.0.0.1:18101/v1/peers             '.peers[0].node_id == "cloud-test-01" and
+             .peers[0].generation == 2 and
+             .peers[0].status == "OBSERVED" and
+             .peers[0].reachability == "REACHABLE" and
+             .peers[0].presence == "ONLINE"'             "$RUNNER_TEMP/a-peers-reembodied.json"
+
+          jq -n             --slurpfile initial "$RUNNER_TEMP/a-peers-initial.json"             --slurpfile partitioned "$RUNNER_TEMP/a-peers-partitioned.json"             --slurpfile reembodied "$RUNNER_TEMP/a-peers-reembodied.json"             '{
+              schema: "wow-sidecar.peer-federation-rep.v1",
+              initial: $initial[0],
+              partitioned: $partitioned[0],
+              reembodied: $reembodied[0],
+              external_service_used: false,
+              mutation_api_exercised: false
+            }' | tee "$RUNNER_TEMP/peer-federation-receipt.json"
+
+          if grep -E -q 'https?://[^"]+' "$RUNNER_TEMP/peer-federation-receipt.json"; then
+            echo 'peer receipt leaked a configured URL' >&2
+            exit 1
+          fi
