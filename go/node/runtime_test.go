@@ -21,7 +21,6 @@ func runtimeConfig(t *testing.T) Config {
 		PublicEndpoint: "https://node.invalid/wow",
 		EndpointKind: "https",
 		EndpointAuth: "overlay",
-		Capabilities: []string{"system.identity"},
 	}
 }
 
@@ -104,7 +103,7 @@ func TestHealthReadyAndCardEndpointsAreMinimalGETSurfaces(t *testing.T) {
 	}
 	handler := runtime.Handler()
 
-	for _, path := range []string{"/healthz", "/readyz", "/v1/card", "/v1/peers"} {
+	for _, path := range []string{"/healthz", "/readyz", "/v1/card", "/v1/peers", "/v1/capabilities", "/v1/capabilities/system.identity"} {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, req)

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/SemperSupra/wow-sidecar/go/capability"
 	"github.com/SemperSupra/wow-sidecar/go/embodiment"
 	"github.com/SemperSupra/wow-sidecar/go/federation"
 	"github.com/SemperSupra/wow-sidecar/go/protocol"
@@ -48,6 +49,7 @@ type Runtime struct {
 	buildVersion    string
 	now             func() time.Time
 	peers           *federation.Observer
+	capabilities    *capability.Registry
 }
 
 func ConfigFromEnv() (Config, error) {
@@ -142,11 +144,9 @@ func newRuntime(config Config, sourceRevision, buildVersion string, now func() t
 	if strings.TrimSpace(buildVersion) == "" {
 		return nil, fmt.Errorf("build version is required")
 	}
-	capabilities, err := sortedUnique(config.Capabilities)
-	if err != nil {
-		return nil, fmt.Errorf("invalid capability set: %w", err)
+	if len(config.Capabilities) != 0 {
+		return nil, fmt.Errorf("capabilities are product-owned and may not be configured")
 	}
-	config.Capabilities = capabilities
 
 	generation, err := allocateGeneration(config.GenerationStateFile, config.NodeID)
 	if err != nil {
@@ -169,6 +169,12 @@ func newRuntime(config Config, sourceRevision, buildVersion string, now func() t
 		now:             now,
 		peers:           peerObserver,
 	}
+	registry, capabilityIDs, err := installCoreCapabilities(runtime)
+	if err != nil {
+		return nil, fmt.Errorf("install core capabilities: %w", err)
+	}
+	runtime.capabilities = registry
+	runtime.config.Capabilities = capabilityIDs
 	if _, err := runtime.Card(); err != nil {
 		return nil, err
 	}
@@ -210,6 +216,8 @@ func (r *Runtime) Handler() http.Handler {
 	mux.HandleFunc("/readyz", r.handleReady)
 	mux.HandleFunc("/v1/card", r.handleCard)
 	mux.HandleFunc("/v1/peers", r.handlePeers)
+	mux.HandleFunc("/v1/capabilities", r.handleCapabilities)
+	mux.HandleFunc("/v1/capabilities/system.identity", r.handleSystemIdentity)
 	return mux
 }
 
