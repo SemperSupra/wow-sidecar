@@ -104,7 +104,7 @@ func TestHealthReadyAndCardEndpointsAreMinimalGETSurfaces(t *testing.T) {
 	}
 	handler := runtime.Handler()
 
-	for _, path := range []string{"/healthz", "/readyz", "/v1/card"} {
+	for _, path := range []string{"/healthz", "/readyz", "/v1/card", "/v1/peers"} {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, req)
@@ -140,6 +140,8 @@ func TestConfigFromEnvIsLoopbackByDefaultAndDoesNotSelfAssertCapabilities(t *tes
 	t.Setenv("WOW_PUBLIC_ENDPOINT", "")
 	t.Setenv("WOW_ENDPOINT_KIND", "")
 	t.Setenv("WOW_ENDPOINT_AUTH", "")
+	t.Setenv("WOW_PEER_URLS", "")
+	t.Setenv("WOW_PEER_POLL_SECONDS", "")
 
 	config, err := ConfigFromEnv()
 	if err != nil {
@@ -161,5 +163,58 @@ func TestConfigRequiresExplicitEndpointContext(t *testing.T) {
 	t.Setenv("WOW_ENDPOINT_AUTH", "")
 	if _, err := ConfigFromEnv(); err == nil || !strings.Contains(err.Error(), "require WOW_PUBLIC_ENDPOINT") {
 		t.Fatalf("orphan endpoint metadata accepted: %v", err)
+	}
+}
+
+
+func TestConfigParsesBoundedPeerObservation(t *testing.T) {
+	t.Setenv("WOW_NODE_ID", "cloud-node-01")
+	t.Setenv("WOW_LOCALITY", "cloud")
+	t.Setenv("WOW_GENERATION_STATE_FILE", filepath.Join(t.TempDir(), "generation.json"))
+	t.Setenv("WOW_LISTEN_ADDR", "127.0.0.1:8080")
+	t.Setenv("WOW_LEASE_SECONDS", "60")
+	t.Setenv("WOW_PUBLIC_ENDPOINT", "")
+	t.Setenv("WOW_ENDPOINT_KIND", "")
+	t.Setenv("WOW_ENDPOINT_AUTH", "")
+	t.Setenv("WOW_PEER_URLS", "https://z.example,http://127.0.0.1:18080/")
+	t.Setenv("WOW_PEER_POLL_SECONDS", "7")
+
+	config, err := ConfigFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(config.PeerURLs) != 2 ||
+		config.PeerURLs[0] != "http://127.0.0.1:18080" ||
+		config.PeerURLs[1] != "https://z.example" {
+		t.Fatalf("unexpected peer URLs: %#v", config.PeerURLs)
+	}
+	if config.PeerPollInterval != 7*time.Second {
+		t.Fatalf("unexpected peer poll interval: %v", config.PeerPollInterval)
+	}
+}
+
+func TestConfigRejectsUnsafePeerObservation(t *testing.T) {
+	base := func() {
+		t.Setenv("WOW_NODE_ID", "cloud-node-01")
+		t.Setenv("WOW_LOCALITY", "cloud")
+		t.Setenv("WOW_GENERATION_STATE_FILE", filepath.Join(t.TempDir(), "generation.json"))
+		t.Setenv("WOW_LISTEN_ADDR", "127.0.0.1:8080")
+		t.Setenv("WOW_LEASE_SECONDS", "")
+		t.Setenv("WOW_PUBLIC_ENDPOINT", "")
+		t.Setenv("WOW_ENDPOINT_KIND", "")
+		t.Setenv("WOW_ENDPOINT_AUTH", "")
+		t.Setenv("WOW_PEER_POLL_SECONDS", "")
+	}
+	base()
+	t.Setenv("WOW_PEER_URLS", "https://user:password@peer.example")
+	if _, err := ConfigFromEnv(); err == nil || !strings.Contains(err.Error(), "WOW_PEER_URLS") {
+		t.Fatalf("credential-bearing peer URL accepted: %v", err)
+	}
+
+	base()
+	t.Setenv("WOW_PEER_URLS", "https://peer.example")
+	t.Setenv("WOW_PEER_POLL_SECONDS", "1")
+	if _, err := ConfigFromEnv(); err == nil || !strings.Contains(err.Error(), "WOW_PEER_POLL_SECONDS") {
+		t.Fatalf("unsafe peer poll cadence accepted: %v", err)
 	}
 }

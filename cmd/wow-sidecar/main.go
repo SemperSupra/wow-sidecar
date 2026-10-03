@@ -64,11 +64,18 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	errs := make(chan error, 1)
+	errs := make(chan error, 2)
 	go func() {
 		log.Printf("wow-sidecar: serving node=%s addr=%s", config.NodeID, runtime.ListenAddr())
 		errs <- server.ListenAndServe()
 	}()
+	if runtime.HasPeers() {
+		go func() {
+			if err := runtime.RunPeers(ctx); err != nil {
+				errs <- fmt.Errorf("peer observer: %w", err)
+			}
+		}()
+	}
 
 	select {
 	case err := <-errs:

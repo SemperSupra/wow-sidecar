@@ -1,6 +1,7 @@
 package node
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/SemperSupra/wow-sidecar/go/embodiment"
+	"github.com/SemperSupra/wow-sidecar/go/federation"
 	"github.com/SemperSupra/wow-sidecar/go/protocol"
 )
 
@@ -21,6 +23,7 @@ const (
 	defaultGenerationStateFile = "/var/lib/wow-sidecar/generation.json"
 	defaultListenAddr          = "127.0.0.1:8080"
 	defaultLeaseTTL            = 60 * time.Second
+	defaultPeerPollInterval    = 15 * time.Second
 )
 
 type Config struct {
@@ -33,6 +36,8 @@ type Config struct {
 	EndpointKind        string
 	EndpointAuth        string
 	Capabilities        []string
+	PeerURLs            []string
+	PeerPollInterval    time.Duration
 }
 
 type Runtime struct {
@@ -42,6 +47,7 @@ type Runtime struct {
 	sourceRevision  string
 	buildVersion    string
 	now             func() time.Time
+	peers           *federation.Observer
 }
 
 func ConfigFromEnv() (Config, error) {
@@ -95,6 +101,19 @@ func ConfigFromEnv() (Config, error) {
 		return Config{}, fmt.Errorf("endpoint kind/auth require WOW_PUBLIC_ENDPOINT")
 	}
 
+	peerURLs, err := federation.ParsePeerURLs(strings.TrimSpace(os.Getenv("WOW_PEER_URLS")))
+	if err != nil {
+		return Config{}, fmt.Errorf("invalid WOW_PEER_URLS: %w", err)
+	}
+	peerPollInterval := defaultPeerPollInterval
+	if raw := strings.TrimSpace(os.Getenv("WOW_PEER_POLL_SECONDS")); raw != "" {
+		seconds, err := strconv.Atoi(raw)
+		if err != nil || seconds < 5 || seconds > 3600 {
+			return Config{}, fmt.Errorf("WOW_PEER_POLL_SECONDS must be between 5 and 3600")
+		}
+		peerPollInterval = time.Duration(seconds) * time.Second
+	}
+
 	return Config{
 		NodeID:              nodeID,
 		Locality:            locality,
@@ -104,6 +123,8 @@ func ConfigFromEnv() (Config, error) {
 		PublicEndpoint:      publicEndpoint,
 		EndpointKind:        endpointKind,
 		EndpointAuth:        endpointAuth,
+		PeerURLs:            peerURLs,
+		PeerPollInterval:    peerPollInterval,
 	}, nil
 }
 
@@ -135,6 +156,10 @@ func newRuntime(config Config, sourceRevision, buildVersion string, now func() t
 	if err != nil {
 		return nil, err
 	}
+	peerObserver, err := federation.NewObserver(config.PeerURLs, nil, now)
+	if err != nil {
+		return nil, fmt.Errorf("configure peer observer: %w", err)
+	}
 	runtime := &Runtime{
 		config:          config,
 		generation:      generation,
@@ -142,6 +167,7 @@ func newRuntime(config Config, sourceRevision, buildVersion string, now func() t
 		sourceRevision:  sourceRevision,
 		buildVersion:    buildVersion,
 		now:             now,
+		peers:           peerObserver,
 	}
 	if _, err := runtime.Card(); err != nil {
 		return nil, err
@@ -183,6 +209,7 @@ func (r *Runtime) Handler() http.Handler {
 	mux.HandleFunc("/healthz", r.handleHealth)
 	mux.HandleFunc("/readyz", r.handleReady)
 	mux.HandleFunc("/v1/card", r.handleCard)
+	mux.HandleFunc("/v1/peers", r.handlePeers)
 	return mux
 }
 
@@ -252,6 +279,24 @@ func (r *Runtime) handleCard(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, card)
+}
+
+func (r *Runtime) handlePeers(w http.ResponseWriter, req *http.Request) {
+	if !requireGET(w, req) {
+		return
+	}
+	writeJSON(w, http.StatusOK, r.peers.Snapshot())
+}
+
+func (r *Runtime) HasPeers() bool {
+	return r != nil && len(r.config.PeerURLs) > 0
+}
+
+func (r *Runtime) RunPeers(ctx context.Context) error {
+	if r == nil || r.peers == nil {
+		return fmt.Errorf("peer observer is unavailable")
+	}
+	return r.peers.Run(ctx, r.config.PeerPollInterval)
 }
 
 func (r *Runtime) ListenAddr() string {
