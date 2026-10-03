@@ -46,10 +46,8 @@ func ConfigFromEnv() (Config, error) {
 		keyText = string(raw)
 	} else {
 		keyText = os.Getenv("GITHUB_APP_PRIVATE_KEY")
-		if strings.Contains(keyText, `\n`) && !strings.Contains(keyText, "
-") {
-			keyText = strings.ReplaceAll(keyText, `\n`, "
-")
+		if strings.Contains(keyText, `\\n`) && !strings.Contains(keyText, "\\n") {
+			keyText = strings.ReplaceAll(keyText, `\\n`, "\\n")
 		}
 	}
 	if appID == "" || strings.TrimSpace(keyText) == "" {
