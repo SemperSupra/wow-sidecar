@@ -315,10 +315,21 @@ func NewReceipt(args ReceiptArgs) (Receipt, error) {
 }
 
 func CanonicalJSON(value any) ([]byte, error) {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var normalized any
+	if err := dec.Decode(&normalized); err != nil {
+		return nil, err
+	}
+
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
-	if err := enc.Encode(value); err != nil {
+	if err := enc.Encode(normalized); err != nil {
 		return nil, err
 	}
 	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
