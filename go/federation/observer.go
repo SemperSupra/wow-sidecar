@@ -69,9 +69,11 @@ type Observer struct {
 }
 
 func ParsePeerURLs(raw string) ([]string, error) {
-	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return nil, nil
+	}
+	if raw != strings.TrimSpace(raw) {
+		return nil, fmt.Errorf("peer URL set must already be normalized")
 	}
 	items := strings.Split(raw, ",")
 	if len(items) > maxPeers {
