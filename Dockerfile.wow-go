@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1.7
 FROM scratch
 
 ARG TARGETARCH
@@ -14,7 +13,7 @@ COPY build/go-container/${TARGETARCH}/wow-sidecar /wow-sidecar
 
 ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 
-USER 65532:65532
+USER 10001:10001
 EXPOSE 8080
 
 ENTRYPOINT ["/wow-sidecar"]
