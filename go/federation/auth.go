@@ -4,7 +4,9 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io"
 	"regexp"
 	"strings"
 	"sync"
@@ -52,6 +54,29 @@ type peerEnvelopeUnsigned struct {
 func PayloadDigest(payload []byte) string {
 	sum := sha256.Sum256(payload)
 	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func DecodePeerEnvelope(data []byte) (PeerEnvelope, error) {
+	dec := json.NewDecoder(strings.NewReader(string(data)))
+	dec.DisallowUnknownFields()
+	var env PeerEnvelope
+	if err := dec.Decode(&env); err != nil {
+		return PeerEnvelope{}, fmt.Errorf("decode peer envelope: %w", err)
+	}
+	var trailing any
+	if err := dec.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return PeerEnvelope{}, fmt.Errorf("peer envelope contains trailing JSON")
+		}
+		return PeerEnvelope{}, fmt.Errorf("decode peer envelope trailing data: %w", err)
+	}
+	if err := validatePeerEnvelopeFields(env); err != nil {
+		return PeerEnvelope{}, err
+	}
+	if !peerSignatureRE.MatchString(env.Signature) {
+		return PeerEnvelope{}, fmt.Errorf("signature is required")
+	}
+	return env, nil
 }
 
 func validatePeerEnvelopeFields(env PeerEnvelope) error {
