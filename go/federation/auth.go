@@ -31,8 +31,10 @@ type PeerEnvelope struct {
 	SourceNodeID        string `json:"source_node_id"`
 	SourceGeneration    uint64 `json:"source_generation"`
 	SourceIncarnationID string `json:"source_incarnation_id"`
-	DestinationNodeID   string `json:"destination_node_id"`
-	RequestID           string `json:"request_id"`
+	DestinationNodeID        string `json:"destination_node_id"`
+	DestinationGeneration    uint64 `json:"destination_generation"`
+	DestinationIncarnationID string `json:"destination_incarnation_id"`
+	RequestID                string `json:"request_id"`
 	IssuedAt            string `json:"issued_at"`
 	Operation           string `json:"operation"`
 	PayloadDigest       string `json:"payload_digest"`
@@ -44,8 +46,10 @@ type peerEnvelopeUnsigned struct {
 	SourceNodeID        string `json:"source_node_id"`
 	SourceGeneration    uint64 `json:"source_generation"`
 	SourceIncarnationID string `json:"source_incarnation_id"`
-	DestinationNodeID   string `json:"destination_node_id"`
-	RequestID           string `json:"request_id"`
+	DestinationNodeID        string `json:"destination_node_id"`
+	DestinationGeneration    uint64 `json:"destination_generation"`
+	DestinationIncarnationID string `json:"destination_incarnation_id"`
+	RequestID                string `json:"request_id"`
 	IssuedAt            string `json:"issued_at"`
 	Operation           string `json:"operation"`
 	PayloadDigest       string `json:"payload_digest"`
@@ -89,6 +93,12 @@ func validatePeerEnvelopeFields(env PeerEnvelope) error {
 	if !peerNodeIDRE.MatchString(env.DestinationNodeID) {
 		return fmt.Errorf("invalid destination_node_id")
 	}
+	if env.DestinationGeneration == 0 {
+		return fmt.Errorf("destination_generation must be positive")
+	}
+	if !peerIncarnationRE.MatchString(env.DestinationIncarnationID) {
+		return fmt.Errorf("invalid destination_incarnation_id")
+	}
 	if env.SourceGeneration == 0 {
 		return fmt.Errorf("source_generation must be positive")
 	}
@@ -124,8 +134,10 @@ func unsignedEnvelope(env PeerEnvelope) peerEnvelopeUnsigned {
 		SourceNodeID:        env.SourceNodeID,
 		SourceGeneration:    env.SourceGeneration,
 		SourceIncarnationID: env.SourceIncarnationID,
-		DestinationNodeID:   env.DestinationNodeID,
-		RequestID:           env.RequestID,
+		DestinationNodeID:        env.DestinationNodeID,
+		DestinationGeneration:    env.DestinationGeneration,
+		DestinationIncarnationID: env.DestinationIncarnationID,
+		RequestID:                env.RequestID,
 		IssuedAt:            env.IssuedAt,
 		Operation:           env.Operation,
 		PayloadDigest:       env.PayloadDigest,
@@ -153,7 +165,7 @@ func SignPeerEnvelope(env PeerEnvelope, key []byte) (PeerEnvelope, error) {
 func VerifyPeerEnvelope(
 	env PeerEnvelope,
 	key []byte,
-	expectedDestination string,
+	currentDestination embodiment.Card,
 	currentPeer embodiment.Card,
 	now time.Time,
 	maxSkew time.Duration,
@@ -171,8 +183,17 @@ func VerifyPeerEnvelope(
 	if !peerSignatureRE.MatchString(env.Signature) {
 		return fmt.Errorf("signature is required")
 	}
-	if env.DestinationNodeID != expectedDestination {
-		return fmt.Errorf("peer envelope destination mismatch")
+	if err := currentDestination.Validate(); err != nil {
+		return fmt.Errorf("current destination card invalid: %w", err)
+	}
+	if env.DestinationNodeID != currentDestination.NodeID {
+		return fmt.Errorf("peer envelope destination node mismatch")
+	}
+	if env.DestinationGeneration != currentDestination.Generation {
+		return fmt.Errorf("peer envelope destination generation mismatch")
+	}
+	if env.DestinationIncarnationID != currentDestination.IncarnationID {
+		return fmt.Errorf("peer envelope destination incarnation mismatch")
 	}
 	if err := currentPeer.Validate(); err != nil {
 		return fmt.Errorf("current peer card invalid: %w", err)
