@@ -57,6 +57,19 @@ func parseAuthorityRecord(record string) (repository string, issueNumber, commen
 	return match[1], issueNumber, commentID, nil
 }
 
+func ValidateIssueCommentAuthorityExpectation(record, revision, state string) error {
+	if _, _, _, err := parseAuthorityRecord(record); err != nil {
+		return err
+	}
+	if !authorityRevisionRE.MatchString(revision) {
+		return fmt.Errorf("invalid authority revision token")
+	}
+	if state != "open" {
+		return fmt.Errorf("authority state must be open")
+	}
+	return nil
+}
+
 func (c *Client) ReadIssueCommentAuthority(ctx context.Context, record string) (IssueCommentAuthority, error) {
 	if c == nil {
 		return IssueCommentAuthority{}, fmt.Errorf("GitHub App client is required")
