@@ -54,6 +54,9 @@ func run() error {
 	if err := runtime.ConfigureControlFromEnv(); err != nil {
 		return err
 	}
+	if err := runtime.ConfigurePeerRendezvousFromEnv(); err != nil {
+		return err
+	}
 
 	server := &http.Server{
 		Addr:              runtime.ListenAddr(),
