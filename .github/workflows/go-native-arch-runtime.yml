@@ -1,0 +1,140 @@
+name: WOW Sidecar native architecture runtime
+
+on:
+  pull_request:
+    paths:
+      - 'go.mod'
+      - 'go/**'
+      - 'cmd/wow-sidecar/**'
+      - 'Dockerfile.wow-go'
+      - '.github/workflows/go-native-arch-runtime.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-runtime:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            goarch: amd64
+          - runner: ubuntu-24.04-arm
+            goarch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: '1.24.13'
+          check-latest: false
+
+      - name: Prove native architecture and source
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(go env GOOS)" = linux
+          test "$(go env GOARCH)" = "${{ matrix.goarch }}"
+          test "$(uname -m)" = "$([ "${{ matrix.goarch }}" = amd64 ] && printf x86_64 || printf aarch64)"
+          go version
+          uname -a
+          test -z "$(git status --porcelain)"
+
+      - name: Native tests and static daemon build
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          version="0.0.0-dev.${sha:0:12}"
+          go vet ./...
+          go test ./...
+          install -d "build/native/${{ matrix.goarch }}"
+          CGO_ENABLED=0 GOOS=linux GOARCH="${{ matrix.goarch }}" \
+            go build -mod=readonly -trimpath -buildvcs=false \
+            -ldflags="-s -w -X main.sourceRevision=$sha -X main.buildVersion=$version" \
+            -o "build/native/${{ matrix.goarch }}/wow-sidecar" ./cmd/wow-sidecar
+          file "build/native/${{ matrix.goarch }}/wow-sidecar"
+          test -x "build/native/${{ matrix.goarch }}/wow-sidecar"
+          version_json="$(build/native/${{ matrix.goarch }}/wow-sidecar version)"
+          jq -e --arg sha "$sha" --arg version "$version" \
+            '.source_revision == $sha and .build_version == $version and .product == "wow-sidecar"' \
+            <<<"$version_json"
+          stat -c 'binary_bytes=%s' "build/native/${{ matrix.goarch }}/wow-sidecar"
+          sha256sum "build/native/${{ matrix.goarch }}/wow-sidecar"
+
+      - name: Build and smoke native scratch image
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          version="0.0.0-dev.${sha:0:12}"
+          install -d "build/go-container/${{ matrix.goarch }}"
+          cp "build/native/${{ matrix.goarch }}/wow-sidecar" "build/go-container/${{ matrix.goarch }}/wow-sidecar"
+          cp /etc/ssl/certs/ca-certificates.crt build/go-container/ca-certificates.crt
+          docker build \
+            -f Dockerfile.wow-go \
+            --build-arg TARGETARCH="${{ matrix.goarch }}" \
+            --build-arg WOW_SOURCE_REVISION="$sha" \
+            --build-arg WOW_BUILD_VERSION="$version" \
+            -t "wow-sidecar-go:native-${{ matrix.goarch }}" .
+          test "$(docker image inspect "wow-sidecar-go:native-${{ matrix.goarch }}" --format '{{.Config.User}}')" = '10001:10001'
+          docker image inspect "wow-sidecar-go:native-${{ matrix.goarch }}" --format 'image_bytes={{.Size}}'
+
+          set +e
+          docker run --rm --entrypoint /bin/sh "wow-sidecar-go:native-${{ matrix.goarch }}" -c true >/tmp/wow-shell.out 2>&1
+          shell_rc=$?
+          set -e
+          test "$shell_rc" -ne 0
+
+          state="$RUNNER_TEMP/wow-sidecar-native-state-${{ matrix.goarch }}"
+          install -d -m 0700 "$state"
+          sudo chown 10001:10001 "$state"
+          name="wow-sidecar-native-${{ matrix.goarch }}"
+          cleanup() { docker rm -f "$name" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+
+          run_generation() {
+            expected="$1"
+            cleanup
+            docker run -d \
+              --name "$name" \
+              --read-only \
+              --mount "type=bind,src=$state,dst=/var/lib/wow-sidecar" \
+              -e "WOW_NODE_ID=ci-${{ matrix.goarch }}-node" \
+              -e WOW_LOCALITY=cloud \
+              -e WOW_LISTEN_ADDR=0.0.0.0:8080 \
+              -p 127.0.0.1:18080:8080 \
+              "wow-sidecar-go:native-${{ matrix.goarch }}" >/dev/null
+            ready=false
+            for attempt in $(seq 1 30); do
+              if curl --fail --silent http://127.0.0.1:18080/healthz >/tmp/health.json; then
+                ready=true
+                break
+              fi
+              sleep 1
+            done
+            test "$ready" = true
+            jq -e --arg sha "$sha" --argjson generation "$expected" \
+              '.status == "ok" and .source_revision == $sha and .generation == $generation' \
+              /tmp/health.json
+            curl --fail --silent http://127.0.0.1:18080/readyz | jq -e '.status == "ready"'
+            curl --fail --silent http://127.0.0.1:18080/v1/card | \
+              jq -e --arg arch "${{ matrix.goarch }}" --argjson generation "$expected" \
+                '.schema == "wow-sidecar.embodiment-card.v1"
+                 and .node_id == ("ci-" + $arch + "-node")
+                 and .generation == $generation'
+            docker stats --no-stream --format 'container={{.Name}} memory={{.MemUsage}} cpu={{.CPUPerc}}' "$name"
+            cleanup
+          }
+
+          run_generation 1
+          run_generation 2
+          trap - EXIT
+          cleanup

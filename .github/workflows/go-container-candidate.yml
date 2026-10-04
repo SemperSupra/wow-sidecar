@@ -1,0 +1,207 @@
+name: WOW Sidecar Go container candidate
+
+on:
+  pull_request:
+    paths:
+      - 'go.mod'
+      - 'go/**'
+      - 'cmd/wow-sidecar/**'
+      - 'Dockerfile.wow-go'
+      - '.github/workflows/go-container-candidate.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  container-candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: '1.24.13'
+          check-latest: false
+
+      - name: Bind exact candidate identity
+        id: identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          test "${#sha}" -eq 40
+          case "$sha" in (*[!0-9a-f]*|'') exit 2;; esac
+          version="0.0.0-dev.${sha:0:12}"
+          printf 'sha=%s\n' "$sha" >> "$GITHUB_OUTPUT"
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+          printf 'candidate_sha=%s\nbuild_version=%s\n' "$sha" "$version"
+
+      - name: Public-safety and dependency guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          surfaces=(go cmd/wow-sidecar Dockerfile.wow-go)
+          if grep -R -n -E 'agent-dispatch-private|agent-dispatch-execution-control-private|truenas-app-foundry-private|garm-provider-truenas-private|wow-sidecar-private' "${surfaces[@]}"; then
+            echo 'private repository identifier found in public Go runtime surface' >&2
+            exit 1
+          fi
+          if grep -R -n -E -- '-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----' "${surfaces[@]}"; then
+            echo 'private key material found in public Go runtime surface' >&2
+            exit 1
+          fi
+          test ! -f go.sum
+          go list -m all | tee /tmp/go-modules.txt
+          test "$(wc -l < /tmp/go-modules.txt)" -eq 1
+
+      - name: Test integrated Go source
+        shell: bash
+        run: |
+          set -euo pipefail
+          go version
+          go vet ./...
+          go test ./...
+
+      - name: Cross-compile exact static binaries
+        env:
+          CANDIDATE_SHA: ${{ steps.identity.outputs.sha }}
+          BUILD_VERSION: ${{ steps.identity.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -d build/go-container/amd64 build/go-container/arm64
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch"               go build -mod=readonly -trimpath -buildvcs=false               -ldflags="-s -w -X main.sourceRevision=$CANDIDATE_SHA -X main.buildVersion=$BUILD_VERSION"               -o "build/go-container/$arch/wow-sidecar" ./cmd/wow-sidecar
+          done
+          cp /etc/ssl/certs/ca-certificates.crt build/go-container/ca-certificates.crt
+          file build/go-container/amd64/wow-sidecar build/go-container/arm64/wow-sidecar
+          file build/go-container/amd64/wow-sidecar | grep -q 'x86-64'
+          file build/go-container/arm64/wow-sidecar | grep -Eq 'ARM aarch64|ARM64|aarch64'
+          sha256sum build/go-container/amd64/wow-sidecar build/go-container/arm64/wow-sidecar build/go-container/ca-certificates.crt
+          version_json="$(build/go-container/amd64/wow-sidecar version)"
+          printf '%s\n' "$version_json"
+          jq -e --arg sha "$CANDIDATE_SHA" --arg version "$BUILD_VERSION"             '.source_revision == $sha and .build_version == $version and .product == "wow-sidecar"'             <<<"$version_json"
+
+      - name: Build and smoke amd64 scratch image
+        env:
+          CANDIDATE_SHA: ${{ steps.identity.outputs.sha }}
+          BUILD_VERSION: ${{ steps.identity.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build             -f Dockerfile.wow-go             --build-arg TARGETARCH=amd64             --build-arg WOW_SOURCE_REVISION="$CANDIDATE_SHA"             --build-arg WOW_BUILD_VERSION="$BUILD_VERSION"             -t wow-sidecar-go:amd64 .
+          test "$(docker image inspect wow-sidecar-go:amd64 --format '{{.Config.User}}')" = '10001:10001'
+          set +e
+          docker run --rm --entrypoint /bin/sh wow-sidecar-go:amd64 -c true >/tmp/wow-shell.out 2>&1
+          shell_rc=$?
+          set -e
+          test "$shell_rc" -ne 0
+
+          state="$RUNNER_TEMP/wow-sidecar-state"
+          install -d -m 0700 "$state"
+          sudo chown 10001:10001 "$state"
+          cleanup() { docker rm -f wow-sidecar-go-smoke >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+
+          run_generation() {
+            expected="$1"
+            cleanup
+            docker run -d               --name wow-sidecar-go-smoke               --read-only               --mount "type=bind,src=$state,dst=/var/lib/wow-sidecar"               -e WOW_NODE_ID=ci-cloud-node               -e WOW_LOCALITY=cloud               -e WOW_LISTEN_ADDR=0.0.0.0:8080               -p 127.0.0.1:18080:8080               wow-sidecar-go:amd64 >/dev/null
+            for attempt in $(seq 1 30); do
+              if curl --fail --silent http://127.0.0.1:18080/healthz >/tmp/health.json; then
+                break
+              fi
+              sleep 1
+            done
+            jq -e --arg sha "$CANDIDATE_SHA" --argjson generation "$expected"               '.status == "ok" and .source_revision == $sha and .generation == $generation'               /tmp/health.json
+            curl --fail --silent http://127.0.0.1:18080/readyz | jq -e '.status == "ready"'
+            curl --fail --silent http://127.0.0.1:18080/v1/card >/tmp/card.json
+            jq -e --argjson generation "$expected"               '.schema == "wow-sidecar.embodiment-card.v1" and .node_id == "ci-cloud-node" and .locality == "cloud" and .generation == $generation'               /tmp/card.json
+            cleanup
+          }
+
+          run_generation 1
+          run_generation 2
+          trap - EXIT
+          cleanup
+
+      - name: Assemble two-platform OCI image layout
+        env:
+          CANDIDATE_SHA: ${{ steps.identity.outputs.sha }}
+          BUILD_VERSION: ${{ steps.identity.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker buildx version
+          builder='wow-sidecar-oci'
+          docker buildx rm -f "$builder" >/dev/null 2>&1 || true
+          docker buildx create --name "$builder" --driver docker-container --driver-opt image=moby/buildkit@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea --use >/dev/null
+          cleanup_builder() { docker buildx rm -f "$builder" >/dev/null 2>&1 || true; }
+          trap cleanup_builder EXIT
+          docker buildx inspect --bootstrap
+
+          builder_container="$(docker ps -q --filter "name=buildx_buildkit_${builder}0" | head -n1)"
+          test -n "$builder_container"
+          builder_image_id="$(docker inspect --format '{{.Image}}' "$builder_container")"
+          printf 'buildkit_container=%s\nbuildkit_image_id=%s\n' "$builder_container" "$builder_image_id"
+          docker image inspect "$builder_image_id" --format 'buildkit_repo_digests={{json .RepoDigests}}'
+
+          oci="$RUNNER_TEMP/wow-sidecar-go.oci"
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            -f Dockerfile.wow-go \
+            --build-arg WOW_SOURCE_REVISION="$CANDIDATE_SHA" \
+            --build-arg WOW_BUILD_VERSION="$BUILD_VERSION" \
+            --provenance=false \
+            --output "type=oci,dest=$oci" .
+          layout="$RUNNER_TEMP/wow-sidecar-oci-layout"
+          mkdir -p "$layout"
+          tar -xf "$oci" -C "$layout"
+          jq . "$layout/index.json"
+          python3 - "$layout" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          root = pathlib.Path(sys.argv[1])
+          index_media_types = {
+              "application/vnd.oci.image.index.v1+json",
+              "application/vnd.docker.distribution.manifest.list.v2+json",
+          }
+          platforms = set()
+
+          def load_blob(digest: str):
+              algorithm, value = digest.split(":", 1)
+              if algorithm != "sha256" or len(value) != 64:
+                  raise SystemExit(f"unsupported OCI descriptor digest: {digest}")
+              return json.loads((root / "blobs" / algorithm / value).read_text())
+
+          def visit(index):
+              manifests = index.get("manifests")
+              if not isinstance(manifests, list):
+                  raise SystemExit("OCI index manifests must be an array")
+              for descriptor in manifests:
+                  platform = descriptor.get("platform")
+                  if isinstance(platform, dict) and platform.get("os") and platform.get("architecture"):
+                      platforms.add(f"{platform['os']}/{platform['architecture']}")
+                      continue
+                  if descriptor.get("mediaType") in index_media_types:
+                      visit(load_blob(descriptor["digest"]))
+                      continue
+                  raise SystemExit(
+                      "OCI descriptor has neither platform nor nested index: "
+                      + json.dumps(descriptor, sort_keys=True)
+                  )
+
+          visit(json.loads((root / "index.json").read_text()))
+          expected = {"linux/amd64", "linux/arm64"}
+          print("platforms=" + ",".join(sorted(platforms)))
+          if platforms != expected:
+              raise SystemExit(f"unexpected OCI platforms: {sorted(platforms)}")
+          PY
+          sha256sum "$oci"
+          trap - EXIT
+          cleanup_builder
