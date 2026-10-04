@@ -18,14 +18,18 @@ The signed envelope binds:
 - source generation;
 - source incarnation;
 - destination node ID;
+- destination generation;
+- destination incarnation;
 - request ID;
 - issue time;
 - exact operation;
 - SHA-256 digest of the exact payload.
 
 The receiver separately compares the source identity/generation/incarnation to
-the currently observed peer card. A valid transport signature therefore does
-not let an old embodiment generation continue to act.
+the currently observed peer card and compares the signed destination
+identity/generation/incarnation to its current local embodiment. A valid
+transport signature therefore cannot be replayed across either the source or
+destination node's generation boundary after restart/re-embodiment.
 
 ## Operations
 
@@ -46,15 +50,16 @@ creating a second durable inbox inside WOW.
 The verifier requires:
 
 - a live current peer card;
-- exact destination identity;
+- exact current destination identity/generation/incarnation;
 - caller-selected bounded clock skew;
 - exact payload digest;
 - HMAC-SHA256 signature.
 
-A bounded replay cache rejects a repeated request ID until its TTL expires.
-At-least-once transport can therefore retry only by reconciling the original
-result or by creating a new request identity after the owning operation permits
-it.
+A bounded replay cache classifies an exact repeated signed request while
+rejecting reuse of the same source/generation/request identity with a different
+signed message. The envelope also binds the destination generation/incarnation,
+so a destination restart invalidates pre-restart requests even though the
+in-memory replay cache is intentionally lost with the old process.
 
 ## Boundary
 
