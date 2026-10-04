@@ -202,9 +202,19 @@ func (c *Client) doJSON(ctx context.Context, method, path, token string, body an
 		}
 		return []any{}, nil
 	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
 	var value any
-	if err := json.Unmarshal(raw, &value); err != nil {
+	if err := dec.Decode(&value); err != nil {
 		return nil, fmt.Errorf("GitHub returned malformed JSON for %s %s", method, path)
+	}
+	var trailing any
+	trailingErr := dec.Decode(&trailing)
+	if trailingErr == nil {
+		return nil, fmt.Errorf("GitHub returned multiple JSON values for %s %s", method, path)
+	}
+	if trailingErr != io.EOF {
+		return nil, fmt.Errorf("GitHub returned malformed trailing JSON for %s %s", method, path)
 	}
 	if expected == "object" {
 		if _, ok := value.(map[string]any); !ok {
@@ -227,16 +237,20 @@ func (c *Client) InstallationIDForRepository(ctx context.Context, repository str
 	if err != nil {
 		return 0, err
 	}
-	value, err := c.doJSON(ctx, http.MethodGet, "/repos/"+owner+"/"+repo+"/installation", jwt, nil, "object")
+	value, err := c.doJSON(ctx, http.MethodGet, "/repos/"+url.PathEscape(owner)+"/"+url.PathEscape(repo)+"/installation", jwt, nil, "object")
 	if err != nil {
 		return 0, err
 	}
 	object := value.(map[string]any)
-	idValue, ok := object["id"].(float64)
-	if !ok || idValue <= 0 || idValue != float64(int64(idValue)) {
+	idValue, ok := object["id"].(json.Number)
+	if !ok {
 		return 0, fmt.Errorf("GitHub App installation id is missing for %s", repository)
 	}
-	return int64(idValue), nil
+	installationID, err := idValue.Int64()
+	if err != nil || installationID <= 0 {
+		return 0, fmt.Errorf("GitHub App installation id is missing for %s", repository)
+	}
+	return installationID, nil
 }
 
 func (c *Client) InstallationTokenForRepository(ctx context.Context, repository string) (string, error) {
