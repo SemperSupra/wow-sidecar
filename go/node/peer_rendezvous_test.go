@@ -56,6 +56,20 @@ func peerHandlerCard(now time.Time) embodiment.Card {
 	}
 }
 
+func peerHandlerDestinationCard(now time.Time) embodiment.Card {
+	return embodiment.Card{
+		Schema:         embodiment.CardSchema,
+		Protocol:       embodiment.ProtocolVersion,
+		NodeID:         "oci-edge-node",
+		Generation:     11,
+		IncarnationID:  "abcdefabcdefabcdefabcdefabcdefab",
+		Locality:       "cloud",
+		Endpoints:      []embodiment.Endpoint{},
+		Capabilities:   []string{},
+		LeaseExpiresAt: now.Add(5 * time.Minute).Format(time.RFC3339Nano),
+	}
+}
+
 func peerHandlerService(t *testing.T, now time.Time) (*RendezvousService, string) {
 	t.Helper()
 	service, err := newRendezvousService(&RendezvousConfig{
@@ -91,7 +105,7 @@ func newPeerHandlerForTest(
 	service, handoffID := peerHandlerService(t, now)
 	handler, err := NewPeerRendezvousHandler(PeerRendezvousHandlerConfig{
 		CurrentDestination: func() (embodiment.Card, bool) {
-			return peerDestinationTestCard(now), true
+			return peerHandlerDestinationCard(now), true
 		},
 		CurrentPeer: func(nodeID string) (embodiment.Card, bool) {
 			if nodeID != "truenas-node" {
@@ -268,7 +282,7 @@ func TestPeerRendezvousHandlerRejectsStalePeerBeforeAuthority(t *testing.T) {
 	authorityCalls := 0
 	handler, err := NewPeerRendezvousHandler(PeerRendezvousHandlerConfig{
 		CurrentDestination: func() (embodiment.Card, bool) {
-			return peerDestinationTestCard(now), true
+			return peerHandlerDestinationCard(now), true
 		},
 		CurrentPeer: func(string) (embodiment.Card, bool) {
 			card := peerHandlerCard(now)
@@ -307,7 +321,7 @@ func TestPeerRendezvousHandlerRejectsStaleDestinationBeforeAuthority(t *testing.
 	authorityCalls := 0
 	handler, err := NewPeerRendezvousHandler(PeerRendezvousHandlerConfig{
 		CurrentDestination: func() (embodiment.Card, bool) {
-			card := peerDestinationTestCard(now)
+			card := peerHandlerDestinationCard(now)
 			card.Generation++
 			card.IncarnationID = "11111111111111111111111111111111"
 			return card, true
