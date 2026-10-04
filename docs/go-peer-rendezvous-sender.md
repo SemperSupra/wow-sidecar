@@ -7,15 +7,17 @@ claim/complete transport can be exercised through an in-process HTTP server.
 
 The sender is explicitly given:
 - its source embodiment card;
-- one destination node ID;
+- the current destination embodiment card (node ID + generation + incarnation);
 - file-backed pairwise credentials;
 - an exact endpoint URL;
 - exact authority reference/revision/state;
 - one strict claim or complete payload;
 - one request ID and clock.
 
-It signs the exact payload with the G6.11a envelope and performs exactly one
-HTTP POST. It contains no automatic retry, discovery, queue, wake, DNS/overlay
+It signs the exact payload with the G6.11a envelope, including both source and
+destination generation/incarnation, and performs exactly one HTTP POST. A
+receiver restart therefore invalidates requests signed for its prior
+embodiment. It contains no automatic retry, discovery, queue, wake, DNS/overlay
 selection, relay policy, or endpoint registry.
 
 Responses are size bounded and strictly decoded.
