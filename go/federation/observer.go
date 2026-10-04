@@ -190,6 +190,31 @@ func (o *Observer) CurrentCard(nodeID string) (embodiment.Card, bool) {
 	return state.Card, true
 }
 
+func (o *Observer) WithCurrentCard(nodeID string, fn func(embodiment.Card) error) error {
+	if o == nil || nodeID == "" {
+		return fmt.Errorf("current peer is unavailable")
+	}
+	if fn == nil {
+		return fmt.Errorf("current peer callback is required")
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	source, ok := o.nodeSources[nodeID]
+	if !ok {
+		return fmt.Errorf("current peer is unavailable")
+	}
+	record, ok := o.records[source]
+	if !ok || record.NodeID != nodeID || record.Status != StatusObserved {
+		return fmt.Errorf("current peer is unavailable")
+	}
+	state, ok := o.tracker.Get(nodeID)
+	if !ok {
+		return fmt.Errorf("current peer is unavailable")
+	}
+	return fn(state.Card)
+}
+
 func (o *Observer) PollOnce(ctx context.Context) {
 	if o == nil {
 		return
