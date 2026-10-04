@@ -40,6 +40,7 @@ type Config struct {
 	PeerURLs            []string
 	PeerPollInterval    time.Duration
 	Control             *ControlConfig
+	Rendezvous          *RendezvousConfig
 }
 
 type Runtime struct {
@@ -52,6 +53,7 @@ type Runtime struct {
 	peers           *federation.Observer
 	capabilities    *capability.Registry
 	control         *ControlWorker
+	rendezvous      *RendezvousService
 }
 
 func ConfigFromEnv() (Config, error) {
@@ -122,6 +124,10 @@ func ConfigFromEnv() (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("invalid durable control configuration: %w", err)
 	}
+	rendezvousConfig, err := rendezvousConfigFromEnv()
+	if err != nil {
+		return Config{}, fmt.Errorf("invalid rendezvous configuration: %w", err)
+	}
 
 	return Config{
 		NodeID:              nodeID,
@@ -135,6 +141,7 @@ func ConfigFromEnv() (Config, error) {
 		PeerURLs:            peerURLs,
 		PeerPollInterval:    peerPollInterval,
 		Control:             controlConfig,
+		Rendezvous:          rendezvousConfig,
 	}, nil
 }
 
@@ -176,6 +183,13 @@ func newRuntime(config Config, sourceRevision, buildVersion string, now func() t
 		buildVersion:    buildVersion,
 		now:             now,
 		peers:           peerObserver,
+	}
+	if config.Rendezvous != nil {
+		service, err := newRendezvousService(config.Rendezvous, now)
+		if err != nil {
+			return nil, fmt.Errorf("configure rendezvous: %w", err)
+		}
+		runtime.rendezvous = service
 	}
 	registry, capabilityIDs, err := installCoreCapabilities(runtime)
 	if err != nil {
