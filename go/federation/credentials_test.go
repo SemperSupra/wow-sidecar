@@ -55,6 +55,9 @@ func TestLoadPeerCredentialsRejectsRelativeSymlinkAndLoosePermissions(t *testing
 	if _, err := LoadPeerCredentials("relative.json"); err == nil {
 		t.Fatal("relative path unexpectedly accepted")
 	}
+	if _, err := LoadPeerCredentials("/tmp/../tmp/peer-credentials.json"); err == nil {
+		t.Fatal("non-normalized absolute path unexpectedly accepted")
+	}
 
 	key := []byte("0123456789abcdef0123456789abcdef")
 	target := writeCredentialFile(t, validCredentialJSON("oci-edge-node", key), 0o600)
@@ -109,7 +112,7 @@ func TestLoadPeerCredentialsRejectsDuplicateInvalidAndMissingPeers(t *testing.T)
 func TestLoadPeerCredentialsRejectsBadKeyMaterial(t *testing.T) {
 	short := base64.StdEncoding.EncodeToString([]byte("too-short"))
 	long := base64.StdEncoding.EncodeToString([]byte(strings.Repeat("x", 129)))
-	for _, encoded := range []string{"not-base64!", short, long} {
+	for _, encoded := range []string{"not-base64!", short, long, " " + base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef"))} {
 		content := `{"schema":"` + PeerCredentialsSchema + `","peers":[{"node_id":"oci-edge-node","key":"` + encoded + `"}]}`
 		path := writeCredentialFile(t, content, 0o600)
 		if _, err := LoadPeerCredentials(path); err == nil {
