@@ -39,6 +39,7 @@ type Config struct {
 	Capabilities        []string
 	PeerURLs            []string
 	PeerPollInterval    time.Duration
+	Control             *ControlConfig
 }
 
 type Runtime struct {
@@ -50,6 +51,7 @@ type Runtime struct {
 	now             func() time.Time
 	peers           *federation.Observer
 	capabilities    *capability.Registry
+	control         *controlWorker
 }
 
 func ConfigFromEnv() (Config, error) {
@@ -115,6 +117,10 @@ func ConfigFromEnv() (Config, error) {
 		}
 		peerPollInterval = time.Duration(seconds) * time.Second
 	}
+	controlConfig, err := controlConfigFromEnv()
+	if err != nil {
+		return Config{}, err
+	}
 
 	return Config{
 		NodeID:              nodeID,
@@ -127,6 +133,7 @@ func ConfigFromEnv() (Config, error) {
 		EndpointAuth:        endpointAuth,
 		PeerURLs:            peerURLs,
 		PeerPollInterval:    peerPollInterval,
+		Control:             controlConfig,
 	}, nil
 }
 
@@ -175,6 +182,13 @@ func newRuntime(config Config, sourceRevision, buildVersion string, now func() t
 	}
 	runtime.capabilities = registry
 	runtime.config.Capabilities = capabilityIDs
+	if config.Control != nil {
+		worker, err := newControlWorker(config.Control, registry, sourceRevision)
+		if err != nil {
+			return nil, fmt.Errorf("configure durable control: %w", err)
+		}
+		runtime.control = worker
+	}
 	if _, err := runtime.Card(); err != nil {
 		return nil, err
 	}
