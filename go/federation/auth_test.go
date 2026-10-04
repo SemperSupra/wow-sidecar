@@ -3,6 +3,7 @@ package federation
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -197,44 +198,63 @@ func TestPeerEnvelopeOnlyAdmitsBoundedRendezvousOperations(t *testing.T) {
 	}
 }
 
-func TestReplayCacheRejectsDuplicateAndExpires(t *testing.T) {
+func TestReplayCacheClassifiesExactDuplicateAndExpires(t *testing.T) {
 	now := time.Now().UTC()
 	cache := NewReplayCache()
-	if err := cache.Accept("truenas-node", 7, "peerreq-0001", now, time.Minute); err != nil {
+	signature := "hmac-sha256:" + strings.Repeat("a", 64)
+	duplicate, err := cache.Admit("truenas-node", 7, "peerreq-0001", signature, now, time.Minute)
+	if err != nil || duplicate {
+		t.Fatalf("first request duplicate=%v err=%v", duplicate, err)
+	}
+	duplicate, err = cache.Admit("truenas-node", 7, "peerreq-0001", signature, now.Add(10*time.Second), time.Minute)
+	if err != nil || !duplicate {
+		t.Fatalf("exact duplicate not classified duplicate=%v err=%v", duplicate, err)
+	}
+	duplicate, err = cache.Admit("truenas-node", 7, "peerreq-0001", signature, now.Add(61*time.Second), time.Minute)
+	if err != nil || duplicate {
+		t.Fatalf("expired replay entry not reusable duplicate=%v err=%v", duplicate, err)
+	}
+}
+
+func TestReplayCacheRejectsRequestIDReuseWithDifferentSignedMessage(t *testing.T) {
+	now := time.Now().UTC()
+	cache := NewReplayCache()
+	first := "hmac-sha256:" + strings.Repeat("a", 64)
+	second := "hmac-sha256:" + strings.Repeat("b", 64)
+	if _, err := cache.Admit("truenas-node", 7, "peerreq-0001", first, now, time.Minute); err != nil {
 		t.Fatal(err)
 	}
-	if err := cache.Accept("truenas-node", 7, "peerreq-0001", now.Add(10*time.Second), time.Minute); err == nil {
-		t.Fatal("duplicate request unexpectedly accepted")
-	}
-	if err := cache.Accept("truenas-node", 7, "peerreq-0001", now.Add(61*time.Second), time.Minute); err != nil {
-		t.Fatalf("expired replay entry not reusable: %v", err)
+	if _, err := cache.Admit("truenas-node", 7, "peerreq-0001", second, now.Add(time.Second), time.Minute); err == nil {
+		t.Fatal("request_id reuse with different signed message unexpectedly accepted")
 	}
 }
 
 func TestReplayCacheScopesIdentityByPeerAndGeneration(t *testing.T) {
 	now := time.Now().UTC()
 	cache := NewReplayCache()
-	if err := cache.Accept("truenas-node", 7, "peerreq-0001", now, time.Minute); err != nil {
+	signature := "hmac-sha256:" + strings.Repeat("a", 64)
+	if _, err := cache.Admit("truenas-node", 7, "peerreq-0001", signature, now, time.Minute); err != nil {
 		t.Fatal(err)
 	}
-	if err := cache.Accept("other-node", 7, "peerreq-0001", now, time.Minute); err != nil {
-		t.Fatalf("other peer collided: %v", err)
+	if duplicate, err := cache.Admit("other-node", 7, "peerreq-0001", signature, now, time.Minute); err != nil || duplicate {
+		t.Fatalf("other peer collided duplicate=%v err=%v", duplicate, err)
 	}
-	if err := cache.Accept("truenas-node", 8, "peerreq-0001", now, time.Minute); err != nil {
-		t.Fatalf("new generation collided: %v", err)
+	if duplicate, err := cache.Admit("truenas-node", 8, "peerreq-0001", signature, now, time.Minute); err != nil || duplicate {
+		t.Fatalf("new generation collided duplicate=%v err=%v", duplicate, err)
 	}
 }
 
 func TestReplayCacheIsCapacityBounded(t *testing.T) {
 	now := time.Now().UTC()
 	cache := NewReplayCache()
+	signature := "hmac-sha256:" + strings.Repeat("a", 64)
 	for i := 0; i < maxReplayEntries; i++ {
 		requestID := fmt.Sprintf("peerreq-%04d", i)
-		if err := cache.Accept("truenas-node", 7, requestID, now, time.Minute); err != nil {
+		if _, err := cache.Admit("truenas-node", 7, requestID, signature, now, time.Minute); err != nil {
 			t.Fatalf("fill entry %d: %v", i, err)
 		}
 	}
-	if err := cache.Accept("truenas-node", 7, "peerreq-overflow", now, time.Minute); err == nil {
+	if _, err := cache.Admit("truenas-node", 7, "peerreq-overflow", signature, now, time.Minute); err == nil {
 		t.Fatal("replay cache accepted entry beyond capacity")
 	}
 }
