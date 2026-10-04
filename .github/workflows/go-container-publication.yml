@@ -1,0 +1,395 @@
+name: WOW Sidecar Go multi-arch publication
+
+on:
+  pull_request:
+    paths:
+      - 'go.mod'
+      - 'go/**'
+      - 'cmd/wow-sidecar/**'
+      - 'Dockerfile.wow-go'
+      - '.github/workflows/go-container-publication.yml'
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact 40-hex main revision to publish
+        required: true
+        type: string
+      confirm:
+        description: Type publish-go-multiarch-exact
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/sempersupra/wow-sidecar
+  BUILDKIT_IMAGE: moby/buildkit@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
+  GOTOOLCHAIN: local
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: '1.24.13'
+          check-latest: false
+
+      - name: Bind exact candidate
+        id: identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          test "${#sha}" -eq 40
+          case "$sha" in (*[!0-9a-f]*|'') exit 2;; esac
+          test -z "$(git status --porcelain)"
+          version="0.0.0-dev.${sha:0:12}"
+          printf 'sha=%s\nversion=%s\n' "$sha" "$version" >> "$GITHUB_OUTPUT"
+
+      - name: Public-safety and dependency guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          surfaces=(go cmd/wow-sidecar Dockerfile.wow-go)
+          if grep -R -n -E 'agent-dispatch-private|truenas-app-foundry-private|garm-provider-truenas-private|wow-sidecar-private' "${surfaces[@]}"; then
+            echo 'private repository identifier found in public Go runtime surface' >&2
+            exit 1
+          fi
+          if grep -R -n -E -- '-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----' "${surfaces[@]}"; then
+            echo 'private key material found in public Go runtime surface' >&2
+            exit 1
+          fi
+          test ! -f go.sum
+          go list -m all | tee /tmp/go-modules.txt
+          test "$(wc -l < /tmp/go-modules.txt)" -eq 1
+          go vet ./...
+          go test ./...
+
+      - name: Build exact static binaries
+        env:
+          CANDIDATE_SHA: ${{ steps.identity.outputs.sha }}
+          BUILD_VERSION: ${{ steps.identity.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -d build/go-container/amd64 build/go-container/arm64
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \
+              go build -mod=readonly -trimpath -buildvcs=false \
+              -ldflags="-s -w -X main.sourceRevision=$CANDIDATE_SHA -X main.buildVersion=$BUILD_VERSION" \
+              -o "build/go-container/$arch/wow-sidecar" ./cmd/wow-sidecar
+          done
+          cp /etc/ssl/certs/ca-certificates.crt build/go-container/ca-certificates.crt
+          file build/go-container/amd64/wow-sidecar | grep -q 'x86-64'
+          file build/go-container/arm64/wow-sidecar | grep -Eq 'ARM aarch64|ARM64|aarch64'
+          sha256sum build/go-container/amd64/wow-sidecar build/go-container/arm64/wow-sidecar
+
+      - name: Qualify two-platform OCI layout without publication
+        env:
+          CANDIDATE_SHA: ${{ steps.identity.outputs.sha }}
+          BUILD_VERSION: ${{ steps.identity.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          builder='wow-sidecar-go-release-qualify'
+          docker buildx rm -f "$builder" >/dev/null 2>&1 || true
+          docker buildx create --name "$builder" --driver docker-container \
+            --driver-opt "image=$BUILDKIT_IMAGE" --use >/dev/null
+          cleanup() { docker buildx rm -f "$builder" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          docker buildx inspect --bootstrap
+
+          oci="$RUNNER_TEMP/wow-sidecar-go-release.oci"
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            -f Dockerfile.wow-go \
+            --build-arg WOW_SOURCE_REVISION="$CANDIDATE_SHA" \
+            --build-arg WOW_BUILD_VERSION="$BUILD_VERSION" \
+            --provenance=false \
+            --output "type=oci,dest=$oci" .
+
+          layout="$RUNNER_TEMP/wow-sidecar-go-release-layout"
+          mkdir -p "$layout"
+          tar -xf "$oci" -C "$layout"
+
+          python3 - "$layout" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          root = pathlib.Path(sys.argv[1])
+          index_types = {
+              "application/vnd.oci.image.index.v1+json",
+              "application/vnd.docker.distribution.manifest.list.v2+json",
+          }
+          platforms = set()
+
+          def load_blob(digest):
+              algorithm, value = digest.split(":", 1)
+              if algorithm != "sha256" or len(value) != 64:
+                  raise SystemExit("unsupported descriptor digest")
+              return json.loads((root / "blobs" / algorithm / value).read_text())
+
+          def visit(index):
+              manifests = index.get("manifests")
+              if not isinstance(manifests, list):
+                  raise SystemExit("OCI index manifests must be an array")
+              for descriptor in manifests:
+                  platform = descriptor.get("platform")
+                  if isinstance(platform, dict) and platform.get("os") and platform.get("architecture"):
+                      platforms.add(platform["os"] + "/" + platform["architecture"])
+                  elif descriptor.get("mediaType") in index_types:
+                      visit(load_blob(descriptor["digest"]))
+                  else:
+                      raise SystemExit("descriptor has neither platform nor nested index")
+
+          visit(json.loads((root / "index.json").read_text()))
+          expected = {"linux/amd64", "linux/arm64"}
+          print("platforms=" + ",".join(sorted(platforms)))
+          if platforms != expected:
+              raise SystemExit("unexpected OCI platform set")
+          PY
+
+          sha256sum "$oci"
+          trap - EXIT
+          cleanup
+
+  publish:
+    if: github.event_name == 'workflow_dispatch'
+    needs: qualify
+    permissions:
+      contents: read
+      packages: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      digest: ${{ steps.publish.outputs.digest }}
+      tag: ${{ steps.publish.outputs.tag }}
+      source_sha: ${{ steps.identity.outputs.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+
+      - name: Enforce explicit main release authority
+        id: identity
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          CONFIRM: ${{ inputs.confirm }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = 'refs/heads/main'
+          test "$CONFIRM" = 'publish-go-multiarch-exact'
+          sha="$(git rev-parse HEAD)"
+          test "${#EXPECTED_SHA}" -eq 40
+          case "$EXPECTED_SHA" in (*[!0-9a-f]*|'') exit 2;; esac
+          test "$sha" = "$EXPECTED_SHA"
+          test -z "$(git status --porcelain)"
+          version="0.0.0-dev.${sha:0:12}"
+          tag="go-source-$sha"
+          printf 'sha=%s\nversion=%s\ntag=%s\n' "$sha" "$version" "$tag" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: '1.24.13'
+          check-latest: false
+
+      - name: Build exact release inputs
+        env:
+          CANDIDATE_SHA: ${{ steps.identity.outputs.sha }}
+          BUILD_VERSION: ${{ steps.identity.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          go vet ./...
+          go test ./...
+          install -d build/go-container/amd64 build/go-container/arm64
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \
+              go build -mod=readonly -trimpath -buildvcs=false \
+              -ldflags="-s -w -X main.sourceRevision=$CANDIDATE_SHA -X main.buildVersion=$BUILD_VERSION" \
+              -o "build/go-container/$arch/wow-sidecar" ./cmd/wow-sidecar
+          done
+          cp /etc/ssl/certs/ca-certificates.crt build/go-container/ca-certificates.crt
+          sha256sum build/go-container/amd64/wow-sidecar build/go-container/arm64/wow-sidecar
+
+      - name: Authenticate package publication
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Publish immutable multi-arch source tag
+        id: publish
+        env:
+          CANDIDATE_SHA: ${{ steps.identity.outputs.sha }}
+          BUILD_VERSION: ${{ steps.identity.outputs.version }}
+          TAG: ${{ steps.identity.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if docker buildx imagetools inspect "$IMAGE:$TAG" >/dev/null 2>&1; then
+            echo "immutable source tag already exists; reconcile before further release action" >&2
+            exit 3
+          fi
+
+          builder='wow-sidecar-go-release-publish'
+          docker buildx rm -f "$builder" >/dev/null 2>&1 || true
+          docker buildx create --name "$builder" --driver docker-container \
+            --driver-opt "image=$BUILDKIT_IMAGE" --use >/dev/null
+          cleanup() { docker buildx rm -f "$builder" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          docker buildx inspect --bootstrap
+
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            -f Dockerfile.wow-go \
+            --build-arg WOW_SOURCE_REVISION="$CANDIDATE_SHA" \
+            --build-arg WOW_BUILD_VERSION="$BUILD_VERSION" \
+            --provenance=mode=max \
+            --sbom=true \
+            --push \
+            -t "$IMAGE:$TAG" .
+
+          digest="$(docker buildx imagetools inspect "$IMAGE:$TAG" --format '{{json .Manifest.Digest}}' | tr -d '"')"
+          case "$digest" in sha256:????????????????????????????????????????????????????????????????) ;; *) exit 4;; esac
+
+          raw="$RUNNER_TEMP/remote-index.json"
+          docker buildx imagetools inspect "$IMAGE@$digest" --raw > "$raw"
+          mapfile -t platforms < <(
+            jq -r '.manifests[]?.platform
+              | select(.os == "linux" and (.architecture == "amd64" or .architecture == "arm64"))
+              | "\(.os)/\(.architecture)"' "$raw" | sort -u
+          )
+          test "${#platforms[@]}" -eq 2
+          test "${platforms[0]}" = 'linux/amd64'
+          test "${platforms[1]}" = 'linux/arm64'
+
+          printf 'published=%s:%s@%s\n' "$IMAGE" "$TAG" "$digest"
+          printf 'digest=%s\ntag=%s\n' "$digest" "$TAG" >> "$GITHUB_OUTPUT"
+          trap - EXIT
+          cleanup
+
+  native-verify:
+    if: github.event_name == 'workflow_dispatch'
+    needs: publish
+    permissions:
+      contents: read
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            goarch: amd64
+          - runner: ubuntu-24.04-arm
+            goarch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 12
+    steps:
+      - name: Authenticate exact digest pull
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Pull and verify exact native runtime
+        env:
+          DIGEST: ${{ needs.publish.outputs.digest }}
+          SOURCE_SHA: ${{ needs.publish.outputs.source_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ref="$IMAGE@$DIGEST"
+          docker pull --platform "linux/${{ matrix.goarch }}" "$ref" >/dev/null
+
+          arch="$(docker image inspect "$ref" --format '{{.Architecture}}')"
+          test "$arch" = '${{ matrix.goarch }}'
+          user="$(docker image inspect "$ref" --format '{{.Config.User}}')"
+          test "$user" = '10001:10001'
+          revision="$(docker image inspect "$ref" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')"
+          test "$revision" = "$SOURCE_SHA"
+
+          set +e
+          docker run --rm --entrypoint /bin/sh "$ref" -c true >/tmp/wow-shell.out 2>&1
+          shell_rc=$?
+          set -e
+          test "$shell_rc" -ne 0
+
+          state="$RUNNER_TEMP/wow-sidecar-published-state-${{ matrix.goarch }}"
+          install -d -m 0700 "$state"
+          sudo chown 10001:10001 "$state"
+          name="wow-sidecar-published-${{ matrix.goarch }}"
+          cleanup() { docker rm -f "$name" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+
+          for expected in 1 2; do
+            cleanup
+            docker run -d \
+              --name "$name" \
+              --read-only \
+              --mount "type=bind,src=$state,dst=/var/lib/wow-sidecar" \
+              -e "WOW_NODE_ID=published-${{ matrix.goarch }}-node" \
+              -e WOW_LOCALITY=cloud \
+              -e WOW_LISTEN_ADDR=0.0.0.0:8080 \
+              -p 127.0.0.1:18080:8080 \
+              "$ref" >/dev/null
+            ready=false
+            for attempt in $(seq 1 30); do
+              if curl --fail --silent http://127.0.0.1:18080/healthz >/tmp/health.json; then
+                ready=true
+                break
+              fi
+              sleep 1
+            done
+            test "$ready" = true
+            jq -e --arg sha "$SOURCE_SHA" --argjson generation "$expected" \
+              '.status == "ok" and .source_revision == $sha and .generation == $generation' \
+              /tmp/health.json
+            curl --fail --silent http://127.0.0.1:18080/readyz | jq -e '.status == "ready"'
+            cleanup
+          done
+          trap - EXIT
+          cleanup
+
+  receipt:
+    if: github.event_name == 'workflow_dispatch'
+    needs: [publish, native-verify]
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Emit sanitized publication receipt
+        env:
+          SOURCE_SHA: ${{ needs.publish.outputs.source_sha }}
+          TAG: ${{ needs.publish.outputs.tag }}
+          DIGEST: ${{ needs.publish.outputs.digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg schema 'wow-sidecar.go-publication-receipt.v1' \
+            --arg source_sha "$SOURCE_SHA" \
+            --arg tag "$TAG" \
+            --arg digest "$DIGEST" \
+            '{
+              schema: $schema,
+              source_sha: $source_sha,
+              immutable_tag: $tag,
+              manifest_digest: $digest,
+              native_runtime: {amd64: "PASS", arm64: "PASS"},
+              deployment_performed: false
+            }' | tee publication-receipt.json
+          cat publication-receipt.json >> "$GITHUB_STEP_SUMMARY"
