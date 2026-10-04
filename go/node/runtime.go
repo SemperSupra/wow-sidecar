@@ -54,6 +54,7 @@ type Runtime struct {
 	capabilities    *capability.Registry
 	control         *ControlWorker
 	rendezvous      *RendezvousService
+	peerRendezvous  *PeerRendezvousHandler
 }
 
 func ConfigFromEnv() (Config, error) {
@@ -241,6 +242,9 @@ func (r *Runtime) Handler() http.Handler {
 	mux.HandleFunc("/v1/capabilities", r.handleCapabilities)
 	mux.HandleFunc("/v1/capabilities/system.identity", r.handleSystemIdentity)
 	mux.HandleFunc("/v1/control", r.handleControl)
+	if r.peerRendezvous != nil {
+		mux.Handle("/v1/peer/rendezvous", r.peerRendezvous)
+	}
 	return mux
 }
 
