@@ -212,18 +212,32 @@ func VerifyPeerEnvelope(
 	return nil
 }
 
+const maxReplayEntries = 4096
+
+type replayKey struct {
+	SourceNodeID     string
+	SourceGeneration uint64
+	RequestID        string
+}
+
 type ReplayCache struct {
 	mu      sync.Mutex
-	entries map[string]time.Time
+	entries map[replayKey]time.Time
 }
 
 func NewReplayCache() *ReplayCache {
-	return &ReplayCache{entries: map[string]time.Time{}}
+	return &ReplayCache{entries: map[replayKey]time.Time{}}
 }
 
-func (c *ReplayCache) Accept(requestID string, now time.Time, ttl time.Duration) error {
+func (c *ReplayCache) Accept(sourceNodeID string, sourceGeneration uint64, requestID string, now time.Time, ttl time.Duration) error {
 	if c == nil {
 		return fmt.Errorf("replay cache is required")
+	}
+	if !peerNodeIDRE.MatchString(sourceNodeID) {
+		return fmt.Errorf("invalid source_node_id")
+	}
+	if sourceGeneration == 0 {
+		return fmt.Errorf("source_generation must be positive")
 	}
 	if !peerRequestIDRE.MatchString(requestID) {
 		return fmt.Errorf("invalid request_id")
@@ -234,14 +248,22 @@ func (c *ReplayCache) Accept(requestID string, now time.Time, ttl time.Duration)
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for id, expires := range c.entries {
+	for key, expires := range c.entries {
 		if !now.Before(expires) {
-			delete(c.entries, id)
+			delete(c.entries, key)
 		}
 	}
-	if expires, exists := c.entries[requestID]; exists && now.Before(expires) {
+	key := replayKey{
+		SourceNodeID:     sourceNodeID,
+		SourceGeneration: sourceGeneration,
+		RequestID:        requestID,
+	}
+	if expires, exists := c.entries[key]; exists && now.Before(expires) {
 		return fmt.Errorf("peer request replay detected")
 	}
-	c.entries[requestID] = now.Add(ttl)
+	if len(c.entries) >= maxReplayEntries {
+		return fmt.Errorf("peer replay cache capacity exceeded")
+	}
+	c.entries[key] = now.Add(ttl)
 	return nil
 }
