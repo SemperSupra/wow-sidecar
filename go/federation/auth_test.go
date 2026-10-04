@@ -1,6 +1,7 @@
 package federation
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -45,6 +46,48 @@ func TestPeerEnvelopeSignVerify(t *testing.T) {
 	}
 	if err := VerifyPeerEnvelope(env, key, "oci-edge-node", peerTestCard(now), now, 2*time.Minute, payload); err != nil {
 		t.Fatalf("verify: %v", err)
+	}
+}
+
+
+func TestDecodePeerEnvelopeStrict(t *testing.T) {
+	now := time.Now().UTC()
+	payload := []byte("{}")
+	key := []byte("0123456789abcdef0123456789abcdef")
+	env, err := SignPeerEnvelope(peerTestEnvelope(now, payload), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := DecodePeerEnvelope(raw)
+	if err != nil {
+		t.Fatalf("decode valid envelope: %v", err)
+	}
+	if decoded.RequestID != env.RequestID || decoded.Signature != env.Signature {
+		t.Fatal("decoded envelope did not preserve signed identity")
+	}
+
+	var object map[string]any
+	if err := json.Unmarshal(raw, &object); err != nil {
+		t.Fatal(err)
+	}
+	object["unexpected"] = true
+	unknown, _ := json.Marshal(object)
+	if _, err := DecodePeerEnvelope(unknown); err == nil {
+		t.Fatal("unknown field unexpectedly accepted")
+	}
+	if _, err := DecodePeerEnvelope(append(raw, []byte("{}")...)); err == nil {
+		t.Fatal("trailing JSON unexpectedly accepted")
+	}
+
+	unsigned := env
+	unsigned.Signature = ""
+	unsignedRaw, _ := json.Marshal(unsigned)
+	if _, err := DecodePeerEnvelope(unsignedRaw); err == nil {
+		t.Fatal("unsigned envelope unexpectedly accepted")
 	}
 }
 
