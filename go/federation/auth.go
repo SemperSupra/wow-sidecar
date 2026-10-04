@@ -220,36 +220,51 @@ type replayKey struct {
 	RequestID        string
 }
 
+type replayEntry struct {
+	Signature string
+	ExpiresAt time.Time
+}
+
 type ReplayCache struct {
 	mu      sync.Mutex
-	entries map[replayKey]time.Time
+	entries map[replayKey]replayEntry
 }
 
 func NewReplayCache() *ReplayCache {
-	return &ReplayCache{entries: map[replayKey]time.Time{}}
+	return &ReplayCache{entries: map[replayKey]replayEntry{}}
 }
 
-func (c *ReplayCache) Accept(sourceNodeID string, sourceGeneration uint64, requestID string, now time.Time, ttl time.Duration) error {
+func (c *ReplayCache) Admit(
+	sourceNodeID string,
+	sourceGeneration uint64,
+	requestID string,
+	signature string,
+	now time.Time,
+	ttl time.Duration,
+) (bool, error) {
 	if c == nil {
-		return fmt.Errorf("replay cache is required")
+		return false, fmt.Errorf("replay cache is required")
 	}
 	if !peerNodeIDRE.MatchString(sourceNodeID) {
-		return fmt.Errorf("invalid source_node_id")
+		return false, fmt.Errorf("invalid source_node_id")
 	}
 	if sourceGeneration == 0 {
-		return fmt.Errorf("source_generation must be positive")
+		return false, fmt.Errorf("source_generation must be positive")
 	}
 	if !peerRequestIDRE.MatchString(requestID) {
-		return fmt.Errorf("invalid request_id")
+		return false, fmt.Errorf("invalid request_id")
+	}
+	if !peerSignatureRE.MatchString(signature) {
+		return false, fmt.Errorf("invalid peer request signature")
 	}
 	if ttl <= 0 || ttl > 30*time.Minute {
-		return fmt.Errorf("replay ttl must be between 1ns and 30m")
+		return false, fmt.Errorf("replay ttl must be between 1ns and 30m")
 	}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for key, expires := range c.entries {
-		if !now.Before(expires) {
+	for key, entry := range c.entries {
+		if !now.Before(entry.ExpiresAt) {
 			delete(c.entries, key)
 		}
 	}
@@ -258,12 +273,15 @@ func (c *ReplayCache) Accept(sourceNodeID string, sourceGeneration uint64, reque
 		SourceGeneration: sourceGeneration,
 		RequestID:        requestID,
 	}
-	if expires, exists := c.entries[key]; exists && now.Before(expires) {
-		return fmt.Errorf("peer request replay detected")
+	if entry, exists := c.entries[key]; exists && now.Before(entry.ExpiresAt) {
+		if entry.Signature != signature {
+			return false, fmt.Errorf("peer request_id reused with a different signed message")
+		}
+		return true, nil
 	}
 	if len(c.entries) >= maxReplayEntries {
-		return fmt.Errorf("peer replay cache capacity exceeded")
+		return false, fmt.Errorf("peer replay cache capacity exceeded")
 	}
-	c.entries[key] = now.Add(ttl)
-	return nil
+	c.entries[key] = replayEntry{Signature: signature, ExpiresAt: now.Add(ttl)}
+	return false, nil
 }
