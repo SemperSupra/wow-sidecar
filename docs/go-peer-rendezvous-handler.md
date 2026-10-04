@@ -13,8 +13,9 @@ Processing order is:
 ```text
 bounded body
 -> strict outer request
--> current peer-card lookup + pairwise credential
--> HMAC / destination / generation / incarnation / freshness / payload digest
+-> current source peer-card lookup + pairwise credential
+-> current local destination-card binding
+-> HMAC / source+destination generation/incarnation / freshness / payload digest
 -> strict operation payload
 -> canonical DLE authority reread
 -> replay admission
@@ -27,7 +28,9 @@ authority source does not consume a request identity or mutate local rendezvous
 state.
 
 Exact duplicate signed requests are classified as duplicates but still flow to
-the already-qualified idempotent rendezvous operation. Reuse of the same replay
+the already-qualified idempotent rendezvous operation. A destination restart or
+re-embodiment changes the current destination generation/incarnation and
+invalidates pre-restart signed requests before authority lookup or mutation. Reuse of the same replay
 identity with a different signed message fails closed.
 
 This slice admits only remote `claim` and `complete`. Offer/notice/wake,
