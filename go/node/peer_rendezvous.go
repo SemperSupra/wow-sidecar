@@ -18,11 +18,13 @@ const maxPeerRendezvousRequestBytes = 16 * 1024
 
 type PeerAuthorityVerifier func(context.Context, string, string, string) error
 type CurrentPeerLookup func(string) (embodiment.Card, bool)
+type CurrentPeerGuard func(string, func(embodiment.Card) error) error
 
 type PeerRendezvousHandlerConfig struct {
 	DestinationCard embodiment.Card
-	CurrentPeer     CurrentPeerLookup
-	Credentials       *federation.PeerCredentials
+	CurrentPeer      CurrentPeerLookup
+	GuardCurrentPeer CurrentPeerGuard
+	Credentials      *federation.PeerCredentials
 	VerifyAuthority   PeerAuthorityVerifier
 	Rendezvous        *RendezvousService
 	Replay            *federation.ReplayCache
@@ -61,6 +63,9 @@ func NewPeerRendezvousHandler(config PeerRendezvousHandlerConfig) (*PeerRendezvo
 	}
 	if config.CurrentPeer == nil {
 		return nil, fmt.Errorf("current peer lookup is required")
+	}
+	if config.GuardCurrentPeer == nil {
+		return nil, fmt.Errorf("current peer mutation guard is required")
 	}
 	if config.Credentials == nil {
 		return nil, fmt.Errorf("peer credentials are required")
@@ -205,31 +210,61 @@ func (h *PeerRendezvousHandler) ServeHTTP(w http.ResponseWriter, req *http.Reque
 		return
 	}
 
-	duplicate, err := h.config.Replay.Admit(
+	var duplicate bool
+	var outcome capability.Outcome
+	failureClass := "peer authentication failed"
+	failureStatus := http.StatusUnauthorized
+	err = h.config.GuardCurrentPeer(
 		wire.Envelope.SourceNodeID,
-		wire.Envelope.SourceGeneration,
-		wire.Envelope.RequestID,
-		wire.Envelope.Signature,
-		now,
-		h.config.ReplayTTL,
-	)
-	if err != nil {
-		http.Error(w, "peer replay rejected", http.StatusConflict)
-		return
-	}
+		func(currentPeer embodiment.Card) error {
+			now = h.config.Now().UTC()
+			if err := federation.VerifyPeerEnvelope(
+				wire.Envelope,
+				key,
+				h.config.DestinationCard,
+				currentPeer,
+				now,
+				h.config.MaxSkew,
+				wire.Payload,
+			); err != nil {
+				return err
+			}
 
-	outcome, err := h.config.Rendezvous.invoke(
-		req.Context(),
-		capability.Request{
-			CapabilityID:      rendezvousCapabilityID,
-			AuthorityRef:      wire.Authority.Record,
-			AuthorityRevision: wire.Authority.Revision,
-			AuthorityState:    wire.Authority.State,
-			Input:             wire.Payload,
+			var err error
+			duplicate, err = h.config.Replay.Admit(
+				wire.Envelope.SourceNodeID,
+				wire.Envelope.SourceGeneration,
+				wire.Envelope.RequestID,
+				wire.Envelope.Signature,
+				now,
+				h.config.ReplayTTL,
+			)
+			if err != nil {
+				failureClass = "peer replay rejected"
+				failureStatus = http.StatusConflict
+				return err
+			}
+
+			outcome, err = h.config.Rendezvous.invoke(
+				req.Context(),
+				capability.Request{
+					CapabilityID:      rendezvousCapabilityID,
+					AuthorityRef:      wire.Authority.Record,
+					AuthorityRevision: wire.Authority.Revision,
+					AuthorityState:    wire.Authority.State,
+					Input:             wire.Payload,
+				},
+			)
+			if err != nil {
+				failureClass = "rendezvous operation not accepted"
+				failureStatus = http.StatusConflict
+				return err
+			}
+			return nil
 		},
 	)
 	if err != nil {
-		http.Error(w, "rendezvous operation not accepted", http.StatusConflict)
+		http.Error(w, failureClass, failureStatus)
 		return
 	}
 
