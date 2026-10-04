@@ -54,6 +54,10 @@ func (s *ControlStore) ctx() context.Context {
 	return context.Background()
 }
 
+func (s *ControlStore) SetContext(ctx context.Context) {
+	s.Context = ctx
+}
+
 func (s *ControlStore) token() (string, error) {
 	return s.Client.InstallationTokenForRepository(s.ctx(), s.Repository)
 }
