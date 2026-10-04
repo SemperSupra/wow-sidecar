@@ -3,6 +3,7 @@ package node
 import (
 	"context"
 	"fmt"
+	"sort"
 	"net/http"
 
 	"github.com/SemperSupra/wow-sidecar/go/capability"
@@ -63,7 +64,16 @@ func installCoreCapabilities(r *Runtime) (*capability.Registry, []string, error)
 	if err != nil {
 		return nil, nil, err
 	}
-	return registry, []string{descriptor.ID}, nil
+	capabilityIDs := []string{descriptor.ID}
+	if r.rendezvous != nil {
+		id, err := registerRendezvousCapability(registry, r)
+		if err != nil {
+			return nil, nil, err
+		}
+		capabilityIDs = append(capabilityIDs, id)
+	}
+	sort.Strings(capabilityIDs)
+	return registry, capabilityIDs, nil
 }
 
 func (r *Runtime) capabilityIndex(ctx context.Context) (capabilityIndex, error) {
