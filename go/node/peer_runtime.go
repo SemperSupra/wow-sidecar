@@ -113,8 +113,9 @@ func (r *Runtime) configurePeerRendezvous(
 	}
 	handler, err := NewPeerRendezvousHandler(PeerRendezvousHandlerConfig{
 		DestinationCard: destinationCard,
-		CurrentPeer:     r.peers.CurrentCard,
-		Credentials:     credentials,
+		CurrentPeer:      r.peers.CurrentCard,
+		GuardCurrentPeer: r.peers.WithCurrentCard,
+		Credentials:      credentials,
 		VerifyAuthority: verifyAuthority,
 		Rendezvous:      r.rendezvous,
 		Replay:          federation.NewReplayCache(),
