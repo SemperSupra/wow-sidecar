@@ -253,6 +253,7 @@ func TestPeerRendezvousSenderRejectsMalformedResponseAndBoundsSize(t *testing.T)
 	key := []byte("0123456789abcdef0123456789abcdef")
 	cases := []string{
 		`{"result":"ELIGIBLE","status":"ok","mutation_performed":false,"duplicate":false,"data":{},"extra":true}`,
+		`{"result":"ELIGIBLE","status":"ok","mutation_performed":false,"duplicate":false,"data":{"unexpected":"value"}}`,
 		`{"result":"ELIGIBLE","status":"ok","mutation_performed":false,"duplicate":false,"data":{}}{}`,
 		strings.Repeat("x", maxPeerRendezvousResponseBytes+1),
 	}
@@ -286,6 +287,51 @@ func TestPeerRendezvousSenderRejectsMalformedResponseAndBoundsSize(t *testing.T)
 		if err == nil {
 			t.Fatalf("malformed response case %d unexpectedly accepted", index)
 		}
+	}
+}
+
+func TestPeerRendezvousSenderDoesNotFollowRedirects(t *testing.T) {
+	now := time.Now().UTC()
+	key := []byte("0123456789abcdef0123456789abcdef")
+	sinkCalls := 0
+	sink := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sinkCalls++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer sink.Close()
+
+	redirectCalls := 0
+	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirectCalls++
+		http.Redirect(w, r, sink.URL+"/sink", http.StatusTemporaryRedirect)
+	}))
+	defer redirect.Close()
+
+	sender, err := NewPeerRendezvousSender(PeerRendezvousSenderConfig{
+		SourceCard:        senderSourceCard(now),
+		DestinationNodeID: "oci-edge-node",
+		Credentials:       senderCredentials(t, "oci-edge-node", key),
+		Client:            redirect.Client(),
+		Now:               func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := json.RawMessage(`{"operation":"claim","handoff_id":"handoff_abc","launch_id":"launch-123"}`)
+	_, err = sender.Send(context.Background(), PeerRendezvousSendRequest{
+		Endpoint:          redirect.URL + "/peer",
+		RequestID:         "peerreq-1009",
+		Operation:         "rendezvous.claim",
+		AuthorityRecord:   peerTestAuthorityRef,
+		AuthorityRevision: peerTestAuthorityRev,
+		AuthorityState:    "open",
+		Payload:           payload,
+	})
+	if err == nil {
+		t.Fatal("redirect unexpectedly followed")
+	}
+	if redirectCalls != 1 || sinkCalls != 0 {
+		t.Fatalf("redirect behavior calls redirect=%d sink=%d", redirectCalls, sinkCalls)
 	}
 }
 
