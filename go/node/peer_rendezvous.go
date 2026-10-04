@@ -20,8 +20,8 @@ type PeerAuthorityVerifier func(context.Context, string, string, string) error
 type CurrentPeerLookup func(string) (embodiment.Card, bool)
 
 type PeerRendezvousHandlerConfig struct {
-	DestinationNodeID string
-	CurrentPeer       CurrentPeerLookup
+	DestinationCard embodiment.Card
+	CurrentPeer     CurrentPeerLookup
 	Credentials       *federation.PeerCredentials
 	VerifyAuthority   PeerAuthorityVerifier
 	Rendezvous        *RendezvousService
@@ -56,8 +56,8 @@ type PeerRendezvousHandler struct {
 }
 
 func NewPeerRendezvousHandler(config PeerRendezvousHandlerConfig) (*PeerRendezvousHandler, error) {
-	if strings.TrimSpace(config.DestinationNodeID) == "" || config.DestinationNodeID != strings.TrimSpace(config.DestinationNodeID) {
-		return nil, fmt.Errorf("destination node id is required")
+	if err := config.DestinationCard.Validate(); err != nil {
+		return nil, fmt.Errorf("destination card is invalid: %w", err)
 	}
 	if config.CurrentPeer == nil {
 		return nil, fmt.Errorf("current peer lookup is required")
@@ -180,7 +180,7 @@ func (h *PeerRendezvousHandler) ServeHTTP(w http.ResponseWriter, req *http.Reque
 	if err := federation.VerifyPeerEnvelope(
 		wire.Envelope,
 		key,
-		h.config.DestinationNodeID,
+		h.config.DestinationCard,
 		currentPeer,
 		now,
 		h.config.MaxSkew,
