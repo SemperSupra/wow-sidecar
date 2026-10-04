@@ -56,6 +56,20 @@ func peerHandlerCard(now time.Time) embodiment.Card {
 	}
 }
 
+func peerHandlerDestinationCard(now time.Time) embodiment.Card {
+	return embodiment.Card{
+		Schema:         embodiment.CardSchema,
+		Protocol:       embodiment.ProtocolVersion,
+		NodeID:         "oci-edge-node",
+		Generation:     11,
+		IncarnationID:  "abcdefabcdefabcdefabcdefabcdefab",
+		Locality:       "cloud",
+		Endpoints:      []embodiment.Endpoint{},
+		Capabilities:   []string{},
+		LeaseExpiresAt: now.Add(5 * time.Minute).Format(time.RFC3339Nano),
+	}
+}
+
 func peerHandlerService(t *testing.T, now time.Time) (*RendezvousService, string) {
 	t.Helper()
 	service, err := newRendezvousService(&RendezvousConfig{
@@ -90,7 +104,7 @@ func newPeerHandlerForTest(
 	key := []byte("0123456789abcdef0123456789abcdef")
 	service, handoffID := peerHandlerService(t, now)
 	handler, err := NewPeerRendezvousHandler(PeerRendezvousHandlerConfig{
-		DestinationNodeID: "oci-edge-node",
+		DestinationCard: peerHandlerDestinationCard(now),
 		CurrentPeer: func(nodeID string) (embodiment.Card, bool) {
 			if nodeID != "truenas-node" {
 				return embodiment.Card{}, false
@@ -125,8 +139,10 @@ func signedPeerWireRequest(
 		SourceNodeID:        "truenas-node",
 		SourceGeneration:    7,
 		SourceIncarnationID: "0123456789abcdef0123456789abcdef",
-		DestinationNodeID:   "oci-edge-node",
-		RequestID:           requestID,
+		DestinationNodeID:        "oci-edge-node",
+		DestinationGeneration:    11,
+		DestinationIncarnationID: "abcdefabcdefabcdefabcdefabcdefab",
+		RequestID:                requestID,
 		IssuedAt:            now.Format(time.RFC3339Nano),
 		Operation:           operation,
 		PayloadDigest:       federation.PayloadDigest(payload),
@@ -263,7 +279,7 @@ func TestPeerRendezvousHandlerRejectsStalePeerBeforeAuthority(t *testing.T) {
 	service, handoffID := peerHandlerService(t, now)
 	authorityCalls := 0
 	handler, err := NewPeerRendezvousHandler(PeerRendezvousHandlerConfig{
-		DestinationNodeID: "oci-edge-node",
+		DestinationCard: peerHandlerDestinationCard(now),
 		CurrentPeer: func(string) (embodiment.Card, bool) {
 			card := peerHandlerCard(now)
 			card.Generation = 8
@@ -291,6 +307,44 @@ func TestPeerRendezvousHandlerRejectsStalePeerBeforeAuthority(t *testing.T) {
 	}
 	if authorityCalls != 0 {
 		t.Fatal("authority verifier called before peer authentication/fencing completed")
+	}
+}
+
+func TestPeerRendezvousHandlerRejectsStaleDestinationBeforeAuthority(t *testing.T) {
+	now := time.Now().UTC()
+	key := []byte("0123456789abcdef0123456789abcdef")
+	service, handoffID := peerHandlerService(t, now)
+	authorityCalls := 0
+	destination := peerHandlerDestinationCard(now)
+	destination.Generation = 12
+	destination.IncarnationID = "11111111111111111111111111111111"
+	handler, err := NewPeerRendezvousHandler(PeerRendezvousHandlerConfig{
+		DestinationCard: destination,
+		CurrentPeer: func(string) (embodiment.Card, bool) {
+			return peerHandlerCard(now), true
+		},
+		Credentials: peerHandlerCredentials(t, key),
+		VerifyAuthority: func(context.Context, string, string, string) error {
+			authorityCalls++
+			return nil
+		},
+		Rendezvous: service,
+		Replay:     federation.NewReplayCache(),
+		Now:        func() time.Time { return now },
+		MaxSkew:    2 * time.Minute,
+		ReplayTTL:  5 * time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := json.RawMessage(`{"operation":"claim","handoff_id":"` + handoffID + `","launch_id":"launch-123"}`)
+	wire := signedPeerWireRequest(t, now, key, "peerreq-dest", "rendezvous.claim", payload)
+	response := servePeerRequest(handler, wire)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("stale destination status=%d body=%q", response.Code, response.Body.String())
+	}
+	if authorityCalls != 0 {
+		t.Fatal("authority verifier called before destination-generation fencing completed")
 	}
 }
 
