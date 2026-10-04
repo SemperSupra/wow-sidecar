@@ -42,7 +42,9 @@ func loadCorpus(t *testing.T) conformanceCorpus {
 		t.Fatalf("read conformance vectors: %v", err)
 	}
 	var corpus conformanceCorpus
-	if err := json.Unmarshal(raw, &corpus); err != nil {
+	dec := json.NewDecoder(strings.NewReader(string(raw)))
+	dec.UseNumber()
+	if err := dec.Decode(&corpus); err != nil {
 		t.Fatalf("decode conformance vectors: %v", err)
 	}
 	if corpus.Schema != "wow-sidecar.conformance.v1" {
@@ -66,7 +68,9 @@ func deepCopyMap(t *testing.T, value map[string]any) map[string]any {
 		t.Fatalf("copy marshal: %v", err)
 	}
 	var out map[string]any
-	if err := json.Unmarshal(raw, &out); err != nil {
+	dec := json.NewDecoder(strings.NewReader(string(raw)))
+	dec.UseNumber()
+	if err := dec.Decode(&out); err != nil {
 		t.Fatalf("copy unmarshal: %v", err)
 	}
 	return out
