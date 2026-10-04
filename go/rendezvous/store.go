@@ -1,6 +1,7 @@
 package rendezvous
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
@@ -22,7 +23,7 @@ type Principal struct {
 	Subject  string `json:"subject"`
 }
 
-type AuthorizeFunc func(worksetRef, delegationID string) (Principal, error)
+type AuthorizeFunc func(context.Context, string, string) (Principal, error)
 type IDFactory func(prefix string) string
 type Clock func() time.Time
 
@@ -180,7 +181,10 @@ func (s *Store) expireLocked(h *Handoff, now time.Time) {
 	h.UpdatedAt = now
 }
 
-func (s *Store) authorizedRecord(handoffID string) (*Handoff, Principal, error) {
+func (s *Store) authorizedRecord(ctx context.Context, handoffID string) (*Handoff, Principal, error) {
+	if ctx == nil {
+		return nil, Principal{}, fmt.Errorf("request context is required")
+	}
 	s.mu.Lock()
 	h := s.handoffs[handoffID]
 	if h == nil {
@@ -192,7 +196,7 @@ func (s *Store) authorizedRecord(handoffID string) (*Handoff, Principal, error) 
 	owner := h.OfferedBy
 	s.mu.Unlock()
 
-	principal, err := s.authorize(worksetRef, delegationID)
+	principal, err := s.authorize(ctx, worksetRef, delegationID)
 	if err != nil {
 		return nil, Principal{}, err
 	}
@@ -206,12 +210,15 @@ func (s *Store) authorizedRecord(handoffID string) (*Handoff, Principal, error) 
 	return h, principal, nil
 }
 
-func (s *Store) Offer(worksetRef, delegationID, note string) (Result, error) {
+func (s *Store) Offer(ctx context.Context, worksetRef, delegationID, note string) (Result, error) {
+	if ctx == nil {
+		return Result{}, fmt.Errorf("request context is required")
+	}
 	note, err := smallText(note, NoteLimit, "note")
 	if err != nil {
 		return Result{}, err
 	}
-	principal, err := s.authorize(worksetRef, delegationID)
+	principal, err := s.authorize(ctx, worksetRef, delegationID)
 	if err != nil {
 		return Result{}, err
 	}
@@ -252,11 +259,14 @@ func (s *Store) Offer(worksetRef, delegationID, note string) (Result, error) {
 	return Result{ReceiptStatus: "offered", Handoff: cloneHandoff(h)}, nil
 }
 
-func (s *Store) Claim(handoffID, launchID string) (Result, error) {
+func (s *Store) Claim(ctx context.Context, handoffID, launchID string) (Result, error) {
+	if ctx == nil {
+		return Result{}, fmt.Errorf("request context is required")
+	}
 	if !launchIDRE.MatchString(launchID) {
 		return Result{}, fmt.Errorf("launch_id must be an opaque 6-128 character identifier")
 	}
-	_, principal, err := s.authorizedRecord(handoffID)
+	_, principal, err := s.authorizedRecord(ctx, handoffID)
 	if err != nil {
 		return Result{}, err
 	}
@@ -293,8 +303,11 @@ func (s *Store) Claim(handoffID, launchID string) (Result, error) {
 	return Result{ReceiptStatus: "claimed", Handoff: cloneHandoff(h)}, nil
 }
 
-func (s *Store) Get(handoffID string) (Handoff, error) {
-	if _, _, err := s.authorizedRecord(handoffID); err != nil {
+func (s *Store) Get(ctx context.Context, handoffID string) (Handoff, error) {
+	if ctx == nil {
+		return Handoff{}, fmt.Errorf("request context is required")
+	}
+	if _, _, err := s.authorizedRecord(ctx, handoffID); err != nil {
 		return Handoff{}, err
 	}
 	now := s.clock()
@@ -308,7 +321,10 @@ func (s *Store) Get(handoffID string) (Handoff, error) {
 	return cloneHandoff(h), nil
 }
 
-func (s *Store) Complete(handoffID, actorInstanceID, status, resultRef, resultNote string) (Result, error) {
+func (s *Store) Complete(ctx context.Context, handoffID, actorInstanceID, status, resultRef, resultNote string) (Result, error) {
+	if ctx == nil {
+		return Result{}, fmt.Errorf("request context is required")
+	}
 	if !terminal(status) {
 		return Result{}, fmt.Errorf("handoff terminal status must be completed, blocked, or failed")
 	}
@@ -321,7 +337,7 @@ func (s *Store) Complete(handoffID, actorInstanceID, status, resultRef, resultNo
 	if err != nil {
 		return Result{}, err
 	}
-	if _, _, err := s.authorizedRecord(handoffID); err != nil {
+	if _, _, err := s.authorizedRecord(ctx, handoffID); err != nil {
 		return Result{}, err
 	}
 	now := s.clock()
