@@ -54,7 +54,7 @@ The runtime binds:
 
 The mutation ordering remains:
 
-`strict/bounded decode -> source+destination authentication/fencing -> strict operation payload -> canonical authority reread -> replay admission -> idempotent local mutation -> minimized response`
+`strict/bounded decode -> source+destination authentication/fencing -> strict operation payload -> canonical authority reread -> atomic current-source re-fence -> replay admission -> idempotent local mutation -> minimized response`
 
 Peer authentication does not establish task authority.
 
@@ -65,6 +65,15 @@ endpoint is in the currently `OBSERVED` state. A never-observed, fetch-failed,
 identity-mismatched, card-rejected, or duplicate-bound endpoint is not admitted
 as a current mutation peer. Envelope verification additionally rejects an
 expired peer-card lease.
+
+Because canonical-authority reread can involve network I/O, the handler does not
+trust the source-card snapshot taken before that read. After authority succeeds,
+it acquires the observer current-peer guard, re-reads and re-verifies source
+generation/incarnation/lease and request freshness, then performs replay
+admission and the local idempotent rendezvous mutation while that observer
+binding remains stable. No network operation occurs while the observer guard is
+held. A peer that advances, fails observation, or expires during authority
+verification is rejected before replay or mutation.
 
 ## Boundary
 
