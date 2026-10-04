@@ -62,7 +62,7 @@ func newSyntheticTwoNode(t *testing.T, now time.Time) (*PeerRendezvousSender, *h
 
 	sender, err := NewPeerRendezvousSender(PeerRendezvousSenderConfig{
 		SourceCard:        senderSourceCard(now),
-		DestinationNodeID: "oci-edge-node",
+		DestinationCard: peerHandlerDestinationCard(now),
 		Credentials:       senderCredentials(t, "oci-edge-node", key),
 		Client:            server.Client(),
 		Now:               func() time.Time { return now },
@@ -135,6 +135,53 @@ func TestPeerRendezvousSenderTwoNodeClaimAndComplete(t *testing.T) {
 	}
 }
 
+func TestPeerRendezvousSenderBindsDestinationEmbodiment(t *testing.T) {
+	now := time.Now().UTC()
+	key := []byte("0123456789abcdef0123456789abcdef")
+	var captured []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"result":"ELIGIBLE","status":"rendezvous-existing-claim","mutation_performed":false,"duplicate":true,"data":{"handoff_id":"handoff_abc","handoff_status":"claimed"}}`))
+	}))
+	defer server.Close()
+
+	destination := peerHandlerDestinationCard(now)
+	sender, err := NewPeerRendezvousSender(PeerRendezvousSenderConfig{
+		SourceCard:      senderSourceCard(now),
+		DestinationCard: destination,
+		Credentials:     senderCredentials(t, destination.NodeID, key),
+		Client:          server.Client(),
+		Now:             func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := json.RawMessage(`{"operation":"claim","handoff_id":"handoff_abc","launch_id":"launch-123"}`)
+	_, err = sender.Send(context.Background(), PeerRendezvousSendRequest{
+		Endpoint:          server.URL + "/peer",
+		RequestID:         "peerreq-destbind",
+		Operation:         "rendezvous.claim",
+		AuthorityRecord:   peerTestAuthorityRef,
+		AuthorityRevision: peerTestAuthorityRev,
+		AuthorityState:    "open",
+		Payload:           payload,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var wire peerRendezvousRequest
+	if err := json.Unmarshal(captured, &wire); err != nil {
+		t.Fatal(err)
+	}
+	if wire.Envelope.DestinationNodeID != destination.NodeID ||
+		wire.Envelope.DestinationGeneration != destination.Generation ||
+		wire.Envelope.DestinationIncarnationID != destination.IncarnationID {
+		t.Fatalf("sender did not bind destination embodiment: %+v", wire.Envelope)
+	}
+}
+
 func TestPeerRendezvousSenderDoesNotRetryTransport(t *testing.T) {
 	now := time.Now().UTC()
 	attempts := 0
@@ -147,7 +194,7 @@ func TestPeerRendezvousSenderDoesNotRetryTransport(t *testing.T) {
 	key := []byte("0123456789abcdef0123456789abcdef")
 	sender, err := NewPeerRendezvousSender(PeerRendezvousSenderConfig{
 		SourceCard:        senderSourceCard(now),
-		DestinationNodeID: "oci-edge-node",
+		DestinationCard: peerHandlerDestinationCard(now),
 		Credentials:       senderCredentials(t, "oci-edge-node", key),
 		Client:            server.Client(),
 		Now:               func() time.Time { return now },
@@ -178,7 +225,7 @@ func TestPeerRendezvousSenderRejectsUnsafeEndpointAndOperation(t *testing.T) {
 	key := []byte("0123456789abcdef0123456789abcdef")
 	sender, err := NewPeerRendezvousSender(PeerRendezvousSenderConfig{
 		SourceCard:        senderSourceCard(now),
-		DestinationNodeID: "oci-edge-node",
+		DestinationCard: peerHandlerDestinationCard(now),
 		Credentials:       senderCredentials(t, "oci-edge-node", key),
 		Now:               func() time.Time { return now },
 	})
@@ -226,7 +273,7 @@ func TestPeerRendezvousSenderRejectsWrongDestinationCredential(t *testing.T) {
 	key := []byte("0123456789abcdef0123456789abcdef")
 	sender, err := NewPeerRendezvousSender(PeerRendezvousSenderConfig{
 		SourceCard:        senderSourceCard(now),
-		DestinationNodeID: "oci-edge-node",
+		DestinationCard: peerHandlerDestinationCard(now),
 		Credentials:       senderCredentials(t, "different-node", key),
 		Now:               func() time.Time { return now },
 	})
@@ -264,7 +311,7 @@ func TestPeerRendezvousSenderRejectsMalformedResponseAndBoundsSize(t *testing.T)
 		}))
 		sender, err := NewPeerRendezvousSender(PeerRendezvousSenderConfig{
 			SourceCard:        senderSourceCard(now),
-			DestinationNodeID: "oci-edge-node",
+			DestinationCard: peerHandlerDestinationCard(now),
 			Credentials:       senderCredentials(t, "oci-edge-node", key),
 			Client:            server.Client(),
 			Now:               func() time.Time { return now },
@@ -309,7 +356,7 @@ func TestPeerRendezvousSenderDoesNotFollowRedirects(t *testing.T) {
 
 	sender, err := NewPeerRendezvousSender(PeerRendezvousSenderConfig{
 		SourceCard:        senderSourceCard(now),
-		DestinationNodeID: "oci-edge-node",
+		DestinationCard: peerHandlerDestinationCard(now),
 		Credentials:       senderCredentials(t, "oci-edge-node", key),
 		Client:            redirect.Client(),
 		Now:               func() time.Time { return now },
@@ -348,7 +395,7 @@ func TestPeerRendezvousSenderWireContainsNoTranscriptOrSecrets(t *testing.T) {
 
 	sender, err := NewPeerRendezvousSender(PeerRendezvousSenderConfig{
 		SourceCard:        senderSourceCard(now),
-		DestinationNodeID: "oci-edge-node",
+		DestinationCard: peerHandlerDestinationCard(now),
 		Credentials:       senderCredentials(t, "oci-edge-node", key),
 		Client:            server.Client(),
 		Now:               func() time.Time { return now },
