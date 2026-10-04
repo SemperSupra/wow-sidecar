@@ -198,6 +198,24 @@ func (w *ControlWorker) verifyAuthority(ctx context.Context, req protocol.Reques
 	)
 }
 
+func (w *ControlWorker) verifyPeerAuthority(
+	ctx context.Context,
+	record string,
+	revision string,
+	state string,
+) error {
+	if w == nil || w.client == nil {
+		return fmt.Errorf("durable control authority verifier is unavailable")
+	}
+	if record != w.config.AuthorityRecord ||
+		revision != w.config.AuthorityRevision ||
+		state != "open" {
+		return fmt.Errorf("peer authority is outside the admitted control binding")
+	}
+	_, err := w.client.VerifyIssueCommentAuthority(ctx, record, revision, state)
+	return err
+}
+
 func (w *ControlWorker) RunOnce(ctx context.Context) ([]control.Outcome, error) {
 	if w == nil {
 		return nil, fmt.Errorf("control worker is nil")
