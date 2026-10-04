@@ -135,9 +135,11 @@ func TestRepositoryScopedInstallationTokenFlow(t *testing.T) {
 func TestGenericJSONShapeValidation(t *testing.T) {
 	key := testKey(t)
 	responses := map[string]string{
-		"/object": `{"ok":true}`,
-		"/array":  `[{"id":1}]`,
-		"/wrong":  `[1]`,
+		"/object":   `{"ok":true}`,
+		"/array":    `[{"id":1}]`,
+		"/wrong":    `[1]`,
+		"/multiple": `{"ok":true} {}`,
+		"/trailing": `{"ok":true}x`,
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, responses[r.URL.Path])
@@ -156,6 +158,12 @@ func TestGenericJSONShapeValidation(t *testing.T) {
 	}
 	if _, err := client.doJSON(context.Background(), http.MethodGet, "/wrong", "token", nil, "object"); err == nil {
 		t.Fatal("wrong JSON shape was accepted")
+	}
+	if _, err := client.doJSON(context.Background(), http.MethodGet, "/multiple", "token", nil, "object"); err == nil {
+		t.Fatal("multiple JSON values were accepted")
+	}
+	if _, err := client.doJSON(context.Background(), http.MethodGet, "/trailing", "token", nil, "object"); err == nil {
+		t.Fatal("malformed trailing JSON was accepted")
 	}
 }
 
@@ -185,5 +193,35 @@ func TestConfigFromEnvPrefersFileBackedKey(t *testing.T) {
 	}
 	if config.AppID != "123" || config.APIBase != "https://api.example.invalid" {
 		t.Fatalf("unexpected config: %#v", config)
+	}
+}
+
+
+func TestInstallationIDPreservesLargeIntegerAndEscapesRepositoryPath(t *testing.T) {
+	key := testKey(t)
+	const largeID int64 = 9007199254740993
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.RawQuery != "" {
+			t.Fatalf("repository path leaked into query: %q", r.URL.RawQuery)
+		}
+		if r.URL.EscapedPath() != "/repos/ExampleOrg/repo%3Fshadow/installation" {
+			t.Fatalf("unexpected escaped path: %q", r.URL.EscapedPath())
+		}
+		io.WriteString(w, `{"id":9007199254740993}`)
+	}))
+	defer server.Close()
+
+	client, err := New(Config{AppID: "12345", PrivateKey: key, APIBase: server.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.Now = func() time.Time { return time.Unix(1_800_000_000, 0) }
+
+	got, err := client.InstallationIDForRepository(context.Background(), "ExampleOrg/repo?shadow")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != largeID {
+		t.Fatalf("installation id lost precision: got %d want %d", got, largeID)
 	}
 }
