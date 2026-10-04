@@ -39,6 +39,7 @@ type Config struct {
 	Capabilities        []string
 	PeerURLs            []string
 	PeerPollInterval    time.Duration
+	Control             *ControlConfig
 }
 
 type Runtime struct {
@@ -50,6 +51,7 @@ type Runtime struct {
 	now             func() time.Time
 	peers           *federation.Observer
 	capabilities    *capability.Registry
+	control         *ControlWorker
 }
 
 func ConfigFromEnv() (Config, error) {
@@ -116,6 +118,11 @@ func ConfigFromEnv() (Config, error) {
 		peerPollInterval = time.Duration(seconds) * time.Second
 	}
 
+	controlConfig, err := controlConfigFromEnv()
+	if err != nil {
+		return Config{}, fmt.Errorf("invalid durable control configuration: %w", err)
+	}
+
 	return Config{
 		NodeID:              nodeID,
 		Locality:            locality,
@@ -127,6 +134,7 @@ func ConfigFromEnv() (Config, error) {
 		EndpointAuth:        endpointAuth,
 		PeerURLs:            peerURLs,
 		PeerPollInterval:    peerPollInterval,
+		Control:             controlConfig,
 	}, nil
 }
 
@@ -218,6 +226,7 @@ func (r *Runtime) Handler() http.Handler {
 	mux.HandleFunc("/v1/peers", r.handlePeers)
 	mux.HandleFunc("/v1/capabilities", r.handleCapabilities)
 	mux.HandleFunc("/v1/capabilities/system.identity", r.handleSystemIdentity)
+	mux.HandleFunc("/v1/control", r.handleControl)
 	return mux
 }
 

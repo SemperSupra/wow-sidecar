@@ -51,6 +51,9 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	if err := runtime.ConfigureControlFromEnv(); err != nil {
+		return err
+	}
 
 	server := &http.Server{
 		Addr:              runtime.ListenAddr(),
@@ -75,6 +78,9 @@ func run() error {
 				errs <- fmt.Errorf("peer observer: %w", err)
 			}
 		}()
+	}
+	if runtime.HasControl() {
+		go runtime.RunControl(ctx)
 	}
 
 	select {
