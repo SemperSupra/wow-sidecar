@@ -168,6 +168,28 @@ func (o *Observer) Configured() int {
 	return len(o.endpoints)
 }
 
+func (o *Observer) CurrentCard(nodeID string) (embodiment.Card, bool) {
+	if o == nil || nodeID == "" {
+		return embodiment.Card{}, false
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	source, ok := o.nodeSources[nodeID]
+	if !ok {
+		return embodiment.Card{}, false
+	}
+	record, ok := o.records[source]
+	if !ok || record.NodeID != nodeID || record.Status != StatusObserved {
+		return embodiment.Card{}, false
+	}
+	state, ok := o.tracker.Get(nodeID)
+	if !ok {
+		return embodiment.Card{}, false
+	}
+	return state.Card, true
+}
+
 func (o *Observer) PollOnce(ctx context.Context) {
 	if o == nil {
 		return
