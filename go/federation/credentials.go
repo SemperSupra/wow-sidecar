@@ -37,6 +37,9 @@ func LoadPeerCredentials(path string) (*PeerCredentials, error) {
 	if !filepath.IsAbs(path) {
 		return nil, fmt.Errorf("peer credential path must be absolute")
 	}
+	if filepath.Clean(path) != path {
+		return nil, fmt.Errorf("peer credential path must already be normalized")
+	}
 
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -55,12 +58,28 @@ func LoadPeerCredentials(path string) (*PeerCredentials, error) {
 		return nil, fmt.Errorf("peer credential file must not be group/world accessible")
 	}
 
-	raw, err := os.ReadFile(path)
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open peer credential file: %w", err)
+	}
+	defer file.Close()
+	openedInfo, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("stat opened peer credential file: %w", err)
+	}
+	if !openedInfo.Mode().IsRegular() || !os.SameFile(info, openedInfo) {
+		return nil, fmt.Errorf("peer credential file changed during admission")
+	}
+	raw, err := io.ReadAll(io.LimitReader(file, maxPeerCredentialFile+1))
 	if err != nil {
 		return nil, fmt.Errorf("read peer credential file: %w", err)
 	}
 	if len(raw) == 0 || len(raw) > maxPeerCredentialFile {
 		return nil, fmt.Errorf("peer credential file size is outside bounds")
+	}
+	finalInfo, err := os.Lstat(path)
+	if err != nil || finalInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(openedInfo, finalInfo) {
+		return nil, fmt.Errorf("peer credential file changed during admission")
 	}
 
 	dec := json.NewDecoder(strings.NewReader(string(raw)))
@@ -90,6 +109,9 @@ func LoadPeerCredentials(path string) (*PeerCredentials, error) {
 		}
 		if _, exists := keys[entry.NodeID]; exists {
 			return nil, fmt.Errorf("duplicate peer credential node_id")
+		}
+		if entry.Key == "" || strings.TrimSpace(entry.Key) != entry.Key || strings.ContainsAny(entry.Key, " \t\r\n") {
+			return nil, fmt.Errorf("peer credential key encoding must be normalized")
 		}
 		decoded, err := base64.StdEncoding.Strict().DecodeString(entry.Key)
 		if err != nil {
