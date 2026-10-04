@@ -24,14 +24,30 @@ func peerTestCard(now time.Time) embodiment.Card {
 	}
 }
 
+func peerDestinationTestCard(now time.Time) embodiment.Card {
+	return embodiment.Card{
+		Schema:         embodiment.CardSchema,
+		Protocol:       embodiment.ProtocolVersion,
+		NodeID:         "oci-edge-node",
+		Generation:     11,
+		IncarnationID:  "abcdefabcdefabcdefabcdefabcdefab",
+		Locality:       "cloud",
+		Endpoints:      []embodiment.Endpoint{},
+		Capabilities:   []string{},
+		LeaseExpiresAt: now.Add(time.Minute).UTC().Format(time.RFC3339Nano),
+	}
+}
+
 func peerTestEnvelope(now time.Time, payload []byte) PeerEnvelope {
 	return PeerEnvelope{
-		Schema:              PeerEnvelopeSchema,
-		SourceNodeID:        "truenas-node",
-		SourceGeneration:    7,
-		SourceIncarnationID: "0123456789abcdef0123456789abcdef",
-		DestinationNodeID:   "oci-edge-node",
-		RequestID:           "peerreq-0001",
+		Schema:                   PeerEnvelopeSchema,
+		SourceNodeID:             "truenas-node",
+		SourceGeneration:         7,
+		SourceIncarnationID:      "0123456789abcdef0123456789abcdef",
+		DestinationNodeID:        "oci-edge-node",
+		DestinationGeneration:    11,
+		DestinationIncarnationID: "abcdefabcdefabcdefabcdefabcdefab",
+		RequestID:                "peerreq-0001",
 		IssuedAt:            now.UTC().Format(time.RFC3339Nano),
 		Operation:           "rendezvous.claim",
 		PayloadDigest:       PayloadDigest(payload),
@@ -46,7 +62,7 @@ func TestPeerEnvelopeSignVerify(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := VerifyPeerEnvelope(env, key, "oci-edge-node", peerTestCard(now), now, 2*time.Minute, payload); err != nil {
+	if err := VerifyPeerEnvelope(env, key, peerDestinationTestCard(now), peerTestCard(now), now, 2*time.Minute, payload); err != nil {
 		t.Fatalf("verify: %v", err)
 	}
 }
@@ -110,6 +126,8 @@ func TestPeerEnvelopeRejectsTampering(t *testing.T) {
 		{"generation", func(e *PeerEnvelope) { e.SourceGeneration++ }},
 		{"incarnation", func(e *PeerEnvelope) { e.SourceIncarnationID = "abcdefabcdefabcdefabcdefabcdefab" }},
 		{"destination", func(e *PeerEnvelope) { e.DestinationNodeID = "other-edge" }},
+		{"destination-generation", func(e *PeerEnvelope) { e.DestinationGeneration++ }},
+		{"destination-incarnation", func(e *PeerEnvelope) { e.DestinationIncarnationID = "11111111111111111111111111111111" }},
 		{"request", func(e *PeerEnvelope) { e.RequestID = "peerreq-9999" }},
 		{"operation", func(e *PeerEnvelope) { e.Operation = "rendezvous.complete" }},
 		{"digest", func(e *PeerEnvelope) { e.PayloadDigest = PayloadDigest([]byte("other")) }},
@@ -118,7 +136,7 @@ func TestPeerEnvelopeRejectsTampering(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			changed := env
 			tc.edit(&changed)
-			if err := VerifyPeerEnvelope(changed, key, "oci-edge-node", peerTestCard(now), now, 2*time.Minute, payload); err == nil {
+			if err := VerifyPeerEnvelope(changed, key, peerDestinationTestCard(now), peerTestCard(now), now, 2*time.Minute, payload); err == nil {
 				t.Fatal("tampered envelope unexpectedly verified")
 			}
 		})
@@ -133,11 +151,28 @@ func TestPeerEnvelopeRejectsWrongKeyAndPayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := VerifyPeerEnvelope(env, []byte("abcdef0123456789abcdef0123456789"), "oci-edge-node", peerTestCard(now), now, 2*time.Minute, payload); err == nil {
+	if err := VerifyPeerEnvelope(env, []byte("abcdef0123456789abcdef0123456789"), peerDestinationTestCard(now), peerTestCard(now), now, 2*time.Minute, payload); err == nil {
 		t.Fatal("wrong key unexpectedly verified")
 	}
-	if err := VerifyPeerEnvelope(env, key, "oci-edge-node", peerTestCard(now), now, 2*time.Minute, []byte("changed")); err == nil {
+	if err := VerifyPeerEnvelope(env, key, peerDestinationTestCard(now), peerTestCard(now), now, 2*time.Minute, []byte("changed")); err == nil {
 		t.Fatal("changed payload unexpectedly verified")
+	}
+}
+
+func TestPeerEnvelopeRejectsDestinationRestart(t *testing.T) {
+	now := time.Now().UTC()
+	payload := []byte("{}")
+	key := []byte("0123456789abcdef0123456789abcdef")
+	env, err := SignPeerEnvelope(peerTestEnvelope(now, payload), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	destination := peerDestinationTestCard(now)
+	destination.Generation++
+	destination.IncarnationID = "11111111111111111111111111111111"
+	if err := VerifyPeerEnvelope(env, key, destination, peerTestCard(now), now, 2*time.Minute, payload); err == nil {
+		t.Fatal("request signed for prior destination generation unexpectedly verified after restart")
 	}
 }
 
@@ -170,7 +205,7 @@ func TestPeerEnvelopeRejectsExpiredPeerAndTimestampSkew(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := VerifyPeerEnvelope(env, key, "oci-edge-node", peerTestCard(now), now, time.Minute, payload); err == nil {
+	if err := VerifyPeerEnvelope(env, key, peerDestinationTestCard(now), peerTestCard(now), now, time.Minute, payload); err == nil {
 		t.Fatal("stale timestamp unexpectedly verified")
 	}
 
