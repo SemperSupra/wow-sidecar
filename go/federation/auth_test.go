@@ -2,6 +2,7 @@ package federation
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -199,14 +200,42 @@ func TestPeerEnvelopeOnlyAdmitsBoundedRendezvousOperations(t *testing.T) {
 func TestReplayCacheRejectsDuplicateAndExpires(t *testing.T) {
 	now := time.Now().UTC()
 	cache := NewReplayCache()
-	if err := cache.Accept("peerreq-0001", now, time.Minute); err != nil {
+	if err := cache.Accept("truenas-node", 7, "peerreq-0001", now, time.Minute); err != nil {
 		t.Fatal(err)
 	}
-	if err := cache.Accept("peerreq-0001", now.Add(10*time.Second), time.Minute); err == nil {
+	if err := cache.Accept("truenas-node", 7, "peerreq-0001", now.Add(10*time.Second), time.Minute); err == nil {
 		t.Fatal("duplicate request unexpectedly accepted")
 	}
-	if err := cache.Accept("peerreq-0001", now.Add(61*time.Second), time.Minute); err != nil {
+	if err := cache.Accept("truenas-node", 7, "peerreq-0001", now.Add(61*time.Second), time.Minute); err != nil {
 		t.Fatalf("expired replay entry not reusable: %v", err)
+	}
+}
+
+func TestReplayCacheScopesIdentityByPeerAndGeneration(t *testing.T) {
+	now := time.Now().UTC()
+	cache := NewReplayCache()
+	if err := cache.Accept("truenas-node", 7, "peerreq-0001", now, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err := cache.Accept("other-node", 7, "peerreq-0001", now, time.Minute); err != nil {
+		t.Fatalf("other peer collided: %v", err)
+	}
+	if err := cache.Accept("truenas-node", 8, "peerreq-0001", now, time.Minute); err != nil {
+		t.Fatalf("new generation collided: %v", err)
+	}
+}
+
+func TestReplayCacheIsCapacityBounded(t *testing.T) {
+	now := time.Now().UTC()
+	cache := NewReplayCache()
+	for i := 0; i < maxReplayEntries; i++ {
+		requestID := fmt.Sprintf("peerreq-%04d", i)
+		if err := cache.Accept("truenas-node", 7, requestID, now, time.Minute); err != nil {
+			t.Fatalf("fill entry %d: %v", i, err)
+		}
+	}
+	if err := cache.Accept("truenas-node", 7, "peerreq-overflow", now, time.Minute); err == nil {
+		t.Fatal("replay cache accepted entry beyond capacity")
 	}
 }
 
