@@ -219,3 +219,33 @@ func TestObserverRejectsOversizeAndDuplicateNodeBinding(t *testing.T) {
 		t.Fatalf("duplicate node binding did not fail closed: %#v", snapshot)
 	}
 }
+
+
+func TestObserverCurrentCardRequiresCurrentlyObservedBinding(t *testing.T) {
+	now := time.Date(2026, 10, 4, 18, 30, 0, 0, time.UTC)
+	source := &mutableCardServer{
+		card: card("peer-node-01", 3, strings.Repeat("a", 32), now.Add(time.Minute)),
+	}
+	server := httptest.NewServer(source)
+	defer server.Close()
+
+	observer, err := NewObserver([]string{server.URL}, server.Client(), func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := observer.CurrentCard("peer-node-01"); ok {
+		t.Fatal("unobserved peer unexpectedly returned a current card")
+	}
+
+	observer.PollOnce(context.Background())
+	got, ok := observer.CurrentCard("peer-node-01")
+	if !ok || got.NodeID != "peer-node-01" || got.Generation != 3 {
+		t.Fatalf("current observed card unavailable: ok=%v card=%#v", ok, got)
+	}
+
+	source.oversize = true
+	observer.PollOnce(context.Background())
+	if _, ok := observer.CurrentCard("peer-node-01"); ok {
+		t.Fatal("fetch-failed peer remained eligible as a current mutation peer")
+	}
+}
