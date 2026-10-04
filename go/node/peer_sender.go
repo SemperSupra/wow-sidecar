@@ -18,9 +18,9 @@ import (
 const maxPeerRendezvousResponseBytes = 16 * 1024
 
 type PeerRendezvousSenderConfig struct {
-	SourceCard        embodiment.Card
-	DestinationNodeID string
-	Credentials       *federation.PeerCredentials
+	SourceCard      embodiment.Card
+	DestinationCard embodiment.Card
+	Credentials     *federation.PeerCredentials
 	Client            *http.Client
 	Now               func() time.Time
 }
@@ -51,11 +51,10 @@ func NewPeerRendezvousSender(config PeerRendezvousSenderConfig) (*PeerRendezvous
 	if err := config.SourceCard.Validate(); err != nil {
 		return nil, fmt.Errorf("source card is invalid: %w", err)
 	}
-	if strings.TrimSpace(config.DestinationNodeID) == "" ||
-		config.DestinationNodeID != strings.TrimSpace(config.DestinationNodeID) {
-		return nil, fmt.Errorf("destination node id is required")
+	if err := config.DestinationCard.Validate(); err != nil {
+		return nil, fmt.Errorf("destination card is invalid: %w", err)
 	}
-	if config.SourceCard.NodeID == config.DestinationNodeID {
+	if config.SourceCard.NodeID == config.DestinationCard.NodeID {
 		return nil, fmt.Errorf("source and destination node ids must differ")
 	}
 	if config.Credentials == nil {
@@ -200,7 +199,7 @@ func (s *PeerRendezvousSender) Send(
 	if err != nil {
 		return PeerRendezvousResult{}, err
 	}
-	key, err := s.config.Credentials.Key(s.config.DestinationNodeID)
+	key, err := s.config.Credentials.Key(s.config.DestinationCard.NodeID)
 	if err != nil {
 		return PeerRendezvousResult{}, fmt.Errorf("destination peer credential unavailable")
 	}
@@ -210,8 +209,10 @@ func (s *PeerRendezvousSender) Send(
 		SourceNodeID:        s.config.SourceCard.NodeID,
 		SourceGeneration:    s.config.SourceCard.Generation,
 		SourceIncarnationID: s.config.SourceCard.IncarnationID,
-		DestinationNodeID:   s.config.DestinationNodeID,
-		RequestID:           request.RequestID,
+		DestinationNodeID:        s.config.DestinationCard.NodeID,
+		DestinationGeneration:    s.config.DestinationCard.Generation,
+		DestinationIncarnationID: s.config.DestinationCard.IncarnationID,
+		RequestID:                request.RequestID,
 		IssuedAt:            now.Format(time.RFC3339Nano),
 		Operation:           request.Operation,
 		PayloadDigest:       federation.PayloadDigest(request.Payload),
