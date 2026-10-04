@@ -1,6 +1,6 @@
 # G6.11e peer rendezvous runtime composition
 
-Authority: `SemperSupra/wow-sidecar-private#86`.
+Qualification projection for the bounded G6.11e runtime-composition slice.
 
 The Go daemon can conditionally register the already-qualified peer rendezvous
 handler. The default runtime remains unchanged: no peer mutation route exists
