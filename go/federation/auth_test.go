@@ -186,13 +186,13 @@ func TestPeerEnvelopeRejectsStaleGenerationAndIncarnation(t *testing.T) {
 	}
 	card := peerTestCard(now)
 	card.Generation = 8
-	if err := VerifyPeerEnvelope(env, key, "oci-edge-node", card, now, 2*time.Minute, payload); err == nil {
+	if err := VerifyPeerEnvelope(env, key, peerDestinationTestCard(now), card, now, 2*time.Minute, payload); err == nil {
 		t.Fatal("stale generation unexpectedly verified")
 	}
 
 	card = peerTestCard(now)
 	card.IncarnationID = "abcdefabcdefabcdefabcdefabcdefab"
-	if err := VerifyPeerEnvelope(env, key, "oci-edge-node", card, now, 2*time.Minute, payload); err == nil {
+	if err := VerifyPeerEnvelope(env, key, peerDestinationTestCard(now), card, now, 2*time.Minute, payload); err == nil {
 		t.Fatal("stale incarnation unexpectedly verified")
 	}
 }
@@ -215,7 +215,7 @@ func TestPeerEnvelopeRejectsExpiredPeerAndTimestampSkew(t *testing.T) {
 	}
 	card := peerTestCard(now)
 	card.LeaseExpiresAt = now.Add(-time.Second).Format(time.RFC3339Nano)
-	if err := VerifyPeerEnvelope(env, key, "oci-edge-node", card, now, time.Minute, payload); err == nil {
+	if err := VerifyPeerEnvelope(env, key, peerDestinationTestCard(now), card, now, time.Minute, payload); err == nil {
 		t.Fatal("expired peer card unexpectedly verified")
 	}
 }
