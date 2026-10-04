@@ -242,10 +242,33 @@ func TestObserverCurrentCardRequiresCurrentlyObservedBinding(t *testing.T) {
 	if !ok || got.NodeID != "peer-node-01" || got.Generation != 3 {
 		t.Fatalf("current observed card unavailable: ok=%v card=%#v", ok, got)
 	}
+	guardCalls := 0
+	if err := observer.WithCurrentCard("peer-node-01", func(card embodiment.Card) error {
+		guardCalls++
+		if card.NodeID != "peer-node-01" || card.Generation != 3 {
+			t.Fatalf("guard returned unexpected card: %#v", card)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("current-card guard rejected observed peer: %v", err)
+	}
+	if guardCalls != 1 {
+		t.Fatalf("current-card guard calls=%d want=1", guardCalls)
+	}
 
 	source.oversize = true
 	observer.PollOnce(context.Background())
 	if _, ok := observer.CurrentCard("peer-node-01"); ok {
 		t.Fatal("fetch-failed peer remained eligible as a current mutation peer")
+	}
+	guardCalls = 0
+	if err := observer.WithCurrentCard("peer-node-01", func(embodiment.Card) error {
+		guardCalls++
+		return nil
+	}); err == nil {
+		t.Fatal("fetch-failed peer remained eligible for guarded mutation")
+	}
+	if guardCalls != 0 {
+		t.Fatalf("guard callback ran for fetch-failed peer: %d", guardCalls)
 	}
 }
