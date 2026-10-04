@@ -3,10 +3,17 @@ package protocol
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"math"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 )
+
+type canonicalInteger string
+type canonicalFloat float64
 
 const (
 	RequestSchema = "agent-dispatch.host-operator-request.v1"
@@ -321,18 +328,184 @@ func CanonicalJSON(value any) ([]byte, error) {
 	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
-	var normalized any
-	if err := dec.Decode(&normalized); err != nil {
+	var decoded any
+	if err := dec.Decode(&decoded); err != nil {
 		return nil, err
 	}
+	normalized, err := normalizeJSONValue(decoded)
+	if err != nil {
+		return nil, err
+	}
+	var out bytes.Buffer
+	if err := appendCanonical(&out, normalized); err != nil {
+		return nil, err
+	}
+	return out.Bytes(), nil
+}
 
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
+func normalizeJSONValue(value any) (any, error) {
+	switch v := value.(type) {
+	case nil, bool, string:
+		return v, nil
+	case json.Number:
+		text := v.String()
+		if strings.ContainsAny(text, ".eE") {
+			parsed, err := v.Float64()
+			if err != nil || math.IsNaN(parsed) || math.IsInf(parsed, 0) {
+				return nil, fmt.Errorf("invalid JSON float %q", text)
+			}
+			return canonicalFloat(parsed), nil
+		}
+		return canonicalInteger(text), nil
+	case float64:
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return nil, fmt.Errorf("invalid JSON float")
+		}
+		return canonicalFloat(v), nil
+	case float32:
+		f := float64(v)
+		if math.IsNaN(f) || math.IsInf(f, 0) {
+			return nil, fmt.Errorf("invalid JSON float")
+		}
+		return canonicalFloat(f), nil
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for key, item := range v {
+			n, err := normalizeJSONValue(item)
+			if err != nil {
+				return nil, err
+			}
+			out[key] = n
+		}
+		return out, nil
+	case []any:
+		out := make([]any, len(v))
+		for i, item := range v {
+			n, err := normalizeJSONValue(item)
+			if err != nil {
+				return nil, err
+			}
+			out[i] = n
+		}
+		return out, nil
+	default:
+		raw, err := json.Marshal(value)
+		if err != nil {
+			return nil, fmt.Errorf("unsupported JSON value %T: %w", value, err)
+		}
+		dec := json.NewDecoder(bytes.NewReader(raw))
+		dec.UseNumber()
+		var normalized any
+		if err := dec.Decode(&normalized); err != nil {
+			return nil, err
+		}
+		return normalizeJSONValue(normalized)
+	}
+}
+
+func appendCanonical(out *bytes.Buffer, value any) error {
+	switch v := value.(type) {
+	case nil:
+		out.WriteString("null")
+	case bool:
+		if v {
+			out.WriteString("true")
+		} else {
+			out.WriteString("false")
+		}
+	case string:
+		raw, err := encodeJSONString(v)
+		if err != nil {
+			return err
+		}
+		out.Write(raw)
+	case canonicalInteger:
+		out.WriteString(string(v))
+	case canonicalFloat:
+		raw, err := formatPythonFloat(float64(v))
+		if err != nil {
+			return err
+		}
+		out.WriteString(raw)
+	case []any:
+		out.WriteByte('[')
+		for i, item := range v {
+			if i > 0 {
+				out.WriteByte(',')
+			}
+			if err := appendCanonical(out, item); err != nil {
+				return err
+			}
+		}
+		out.WriteByte(']')
+	case map[string]any:
+		keys := make([]string, 0, len(v))
+		for key := range v {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		out.WriteByte('{')
+		for i, key := range keys {
+			if i > 0 {
+				out.WriteByte(',')
+			}
+			rawKey, err := encodeJSONString(key)
+			if err != nil {
+				return err
+			}
+			out.Write(rawKey)
+			out.WriteByte(':')
+			if err := appendCanonical(out, v[key]); err != nil {
+				return err
+			}
+		}
+		out.WriteByte('}')
+	default:
+		return fmt.Errorf("unsupported normalized JSON value %T", value)
+	}
+	return nil
+}
+
+func formatPythonFloat(value float64) (string, error) {
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		return "", errors.New("non-finite JSON float is not allowed")
+	}
+	if value == 0 {
+		if math.Signbit(value) {
+			return "-0.0", nil
+		}
+		return "0.0", nil
+	}
+	scientific := strconv.FormatFloat(value, 'e', -1, 64)
+	marker := strings.LastIndexByte(scientific, 'e')
+	if marker < 0 {
+		return "", fmt.Errorf("cannot determine decimal exponent for %q", scientific)
+	}
+	exponent, err := strconv.Atoi(scientific[marker+1:])
+	if err != nil {
+		return "", fmt.Errorf("invalid decimal exponent in %q", scientific)
+	}
+	if exponent >= -4 && exponent < 16 {
+		fixed := strconv.FormatFloat(value, 'f', -1, 64)
+		if !strings.ContainsRune(fixed, '.') {
+			fixed += ".0"
+		}
+		return fixed, nil
+	}
+	return scientific, nil
+}
+
+func encodeJSONString(value string) ([]byte, error) {
+	var out bytes.Buffer
+	enc := json.NewEncoder(&out)
 	enc.SetEscapeHTML(false)
-	if err := enc.Encode(normalized); err != nil {
+	if err := enc.Encode(value); err != nil {
 		return nil, err
 	}
-	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
+	raw := bytes.TrimSuffix(out.Bytes(), []byte("\n"))
+	raw = bytes.ReplaceAll(raw, []byte("\\u2028"), []byte(string(rune(0x2028))))
+	raw = bytes.ReplaceAll(raw, []byte("\\u2029"), []byte(string(rune(0x2029))))
+	return raw, nil
 }
 
 func DecidePreExecution(requestID, requestSHA string, claims, receipts map[string]string) (PreExecutionDecision, error) {
