@@ -64,7 +64,7 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	errs := make(chan error, 2)
+	errs := make(chan error, 3)
 	go func() {
 		log.Printf("wow-sidecar: serving node=%s addr=%s", config.NodeID, runtime.ListenAddr())
 		errs <- server.ListenAndServe()
@@ -73,6 +73,13 @@ func run() error {
 		go func() {
 			if err := runtime.RunPeers(ctx); err != nil {
 				errs <- fmt.Errorf("peer observer: %w", err)
+			}
+		}()
+	}
+	if runtime.HasControl() {
+		go func() {
+			if err := runtime.RunControl(ctx); err != nil {
+				errs <- fmt.Errorf("durable control: %w", err)
 			}
 		}()
 	}
