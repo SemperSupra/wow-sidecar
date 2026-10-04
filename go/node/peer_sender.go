@@ -65,7 +65,16 @@ func NewPeerRendezvousSender(config PeerRendezvousSenderConfig) (*PeerRendezvous
 		return nil, fmt.Errorf("clock is required")
 	}
 	if config.Client == nil {
-		config.Client = &http.Client{Timeout: 10 * time.Second}
+		config.Client = &http.Client{}
+	} else {
+		copy := *config.Client
+		config.Client = &copy
+	}
+	if config.Client.Timeout <= 0 {
+		config.Client.Timeout = 10 * time.Second
+	}
+	config.Client.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return fmt.Errorf("peer rendezvous redirects are prohibited")
 	}
 	return &PeerRendezvousSender{config: config}, nil
 }
@@ -160,6 +169,19 @@ func decodePeerRendezvousResponse(raw []byte) (PeerRendezvousResult, error) {
 	}
 	if response.Data == nil {
 		return PeerRendezvousResult{}, fmt.Errorf("peer rendezvous response data is required")
+	}
+	allowedData := map[string]bool{
+		"receipt_status":    true,
+		"handoff_id":        true,
+		"handoff_status":    true,
+		"actor_instance_id": true,
+		"lease_expires_at":  true,
+		"completed_at":      true,
+	}
+	for key := range response.Data {
+		if !allowedData[key] {
+			return PeerRendezvousResult{}, fmt.Errorf("peer rendezvous response contains unsupported data field")
+		}
 	}
 	return response, nil
 }
