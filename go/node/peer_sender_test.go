@@ -337,7 +337,7 @@ func TestPeerRendezvousSenderDoesNotFollowRedirects(t *testing.T) {
 
 func TestPeerRendezvousSenderWireContainsNoTranscriptOrSecrets(t *testing.T) {
 	now := time.Now().UTC()
-	key := []byte("0123456789abcdef0123456789abcdef")
+	key := []byte("peer-secret-material-0123456789ABC")
 	var captured []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		captured, _ = io.ReadAll(r.Body)
@@ -369,7 +369,10 @@ func TestPeerRendezvousSenderWireContainsNoTranscriptOrSecrets(t *testing.T) {
 		t.Fatal(err)
 	}
 	wire := string(captured)
-	if strings.Contains(wire, string(key)) || strings.Contains(wire, "transcript") || strings.Contains(wire, "conversation") {
+	if strings.Contains(wire, string(key)) ||
+		strings.Contains(wire, base64.StdEncoding.EncodeToString(key)) ||
+		strings.Contains(wire, "transcript") ||
+		strings.Contains(wire, "conversation") {
 		t.Fatalf("wire exposed secret/transcript material: %s", wire)
 	}
 }
