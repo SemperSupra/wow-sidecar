@@ -161,6 +161,78 @@ jobs:
           trap - EXIT
           cleanup
 
+      - name: Qualify publication receipt v2 contract without publishing
+        env:
+          SOURCE_SHA: ${{ steps.identity.outputs.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          manifest="sha256:$(printf 'a%.0s' {1..64})"
+          amd64="sha256:$(printf 'b%.0s' {1..64})"
+          arm64="sha256:$(printf 'c%.0s' {1..64})"
+          receipt="$RUNNER_TEMP/publication-receipt-v2.synthetic.json"
+          jq -n \
+            --arg schema 'wow-sidecar.go-publication-receipt.v2' \
+            --arg source_sha "$SOURCE_SHA" \
+            --arg tag "go-source-$SOURCE_SHA" \
+            --arg digest "$manifest" \
+            --arg amd64_digest "$amd64" \
+            --arg arm64_digest "$arm64" \
+            --arg run_id "$GITHUB_RUN_ID" \
+            --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg workflow_sha "$GITHUB_WORKFLOW_SHA" \
+            --arg buildkit_image "$BUILDKIT_IMAGE" \
+            '{
+              schema: $schema,
+              source_sha: $source_sha,
+              immutable_tag: $tag,
+              manifest_digest: $digest,
+              platform_digests: {
+                "linux/amd64": $amd64_digest,
+                "linux/arm64": $arm64_digest
+              },
+              publication: {
+                run_id: $run_id,
+                run_attempt: $run_attempt,
+                workflow_sha: $workflow_sha
+              },
+              build_recipe: {
+                dockerfile: "Dockerfile.wow-go",
+                workflow: ".github/workflows/go-container-publication.yml",
+                go_toolchain: "1.24.13",
+                buildkit_image: $buildkit_image,
+                provenance: "mode=max",
+                sbom: true
+              },
+              native_runtime: {amd64: "PASS", arm64: "PASS"},
+              deployment_performed: false
+            }' > "$receipt"
+
+          jq -e \
+            --arg sha "$SOURCE_SHA" \
+            --arg manifest "$manifest" \
+            --arg amd64 "$amd64" \
+            --arg arm64 "$arm64" \
+            '
+              .schema == "wow-sidecar.go-publication-receipt.v2" and
+              .source_sha == $sha and
+              .manifest_digest == $manifest and
+              .platform_digests["linux/amd64"] == $amd64 and
+              .platform_digests["linux/arm64"] == $arm64 and
+              (.publication.run_id | length) > 0 and
+              (.publication.run_attempt | length) > 0 and
+              (.publication.workflow_sha | length) == 40 and
+              .build_recipe.dockerfile == "Dockerfile.wow-go" and
+              .build_recipe.workflow == ".github/workflows/go-container-publication.yml" and
+              .build_recipe.go_toolchain == "1.24.13" and
+              (.build_recipe.buildkit_image | startswith("moby/buildkit@sha256:")) and
+              .build_recipe.provenance == "mode=max" and
+              .build_recipe.sbom == true and
+              .native_runtime.amd64 == "PASS" and
+              .native_runtime.arm64 == "PASS" and
+              .deployment_performed == false
+            ' "$receipt" >/dev/null
+
   publish:
     if: github.event_name == 'workflow_dispatch'
     needs: qualify
