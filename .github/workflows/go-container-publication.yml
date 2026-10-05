@@ -173,6 +173,8 @@ jobs:
       digest: ${{ steps.publish.outputs.digest }}
       tag: ${{ steps.publish.outputs.tag }}
       source_sha: ${{ steps.identity.outputs.sha }}
+      amd64_digest: ${{ steps.publish.outputs.amd64_digest }}
+      arm64_digest: ${{ steps.publish.outputs.arm64_digest }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -275,8 +277,20 @@ jobs:
           test "${platforms[0]}" = 'linux/amd64'
           test "${platforms[1]}" = 'linux/arm64'
 
+          amd64_digest="$(jq -r '[.manifests[]?
+            | select(.platform.os == "linux" and .platform.architecture == "amd64")
+            | .digest] | unique | if length == 1 then .[0] else empty end' "$raw")"
+          arm64_digest="$(jq -r '[.manifests[]?
+            | select(.platform.os == "linux" and .platform.architecture == "arm64")
+            | .digest] | unique | if length == 1 then .[0] else empty end' "$raw")"
+          case "$amd64_digest" in sha256:????????????????????????????????????????????????????????????????) ;; *) exit 5;; esac
+          case "$arm64_digest" in sha256:????????????????????????????????????????????????????????????????) ;; *) exit 6;; esac
+          test "$amd64_digest" != "$arm64_digest"
+
           printf 'published=%s:%s@%s\n' "$IMAGE" "$TAG" "$digest"
-          printf 'digest=%s\ntag=%s\n' "$digest" "$TAG" >> "$GITHUB_OUTPUT"
+          printf 'amd64=%s\narm64=%s\n' "$amd64_digest" "$arm64_digest"
+          printf 'digest=%s\ntag=%s\namd64_digest=%s\narm64_digest=%s\n' \
+            "$digest" "$TAG" "$amd64_digest" "$arm64_digest" >> "$GITHUB_OUTPUT"
           trap - EXIT
           cleanup
 
@@ -376,19 +390,47 @@ jobs:
           SOURCE_SHA: ${{ needs.publish.outputs.source_sha }}
           TAG: ${{ needs.publish.outputs.tag }}
           DIGEST: ${{ needs.publish.outputs.digest }}
+          AMD64_DIGEST: ${{ needs.publish.outputs.amd64_digest }}
+          ARM64_DIGEST: ${{ needs.publish.outputs.arm64_digest }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
         shell: bash
         run: |
           set -euo pipefail
           jq -n \
-            --arg schema 'wow-sidecar.go-publication-receipt.v1' \
+            --arg schema 'wow-sidecar.go-publication-receipt.v2' \
             --arg source_sha "$SOURCE_SHA" \
             --arg tag "$TAG" \
             --arg digest "$DIGEST" \
+            --arg amd64_digest "$AMD64_DIGEST" \
+            --arg arm64_digest "$ARM64_DIGEST" \
+            --arg run_id "$RUN_ID" \
+            --arg run_attempt "$RUN_ATTEMPT" \
+            --arg workflow_sha "$WORKFLOW_SHA" \
+            --arg buildkit_image "$BUILDKIT_IMAGE" \
             '{
               schema: $schema,
               source_sha: $source_sha,
               immutable_tag: $tag,
               manifest_digest: $digest,
+              platform_digests: {
+                "linux/amd64": $amd64_digest,
+                "linux/arm64": $arm64_digest
+              },
+              publication: {
+                run_id: $run_id,
+                run_attempt: $run_attempt,
+                workflow_sha: $workflow_sha
+              },
+              build_recipe: {
+                dockerfile: "Dockerfile.wow-go",
+                workflow: ".github/workflows/go-container-publication.yml",
+                go_toolchain: "1.24.13",
+                buildkit_image: $buildkit_image,
+                provenance: "mode=max",
+                sbom: true
+              },
               native_runtime: {amd64: "PASS", arm64: "PASS"},
               deployment_performed: false
             }' | tee publication-receipt.json
