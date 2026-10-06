@@ -507,3 +507,27 @@ jobs:
               deployment_performed: false
             }' | tee publication-receipt.json
           cat publication-receipt.json >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Retain machine-readable publication receipt
+        id: receipt_artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          path: publication-receipt.json
+          if-no-files-found: error
+          retention-days: 90
+          archive: false
+
+      - name: Record durable receipt artifact identity
+        env:
+          ARTIFACT_ID: ${{ steps.receipt_artifact.outputs.artifact-id }}
+          ARTIFACT_URL: ${{ steps.receipt_artifact.outputs.artifact-url }}
+          ARTIFACT_DIGEST: ${{ steps.receipt_artifact.outputs.artifact-digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            printf '\n### Durable publication receipt artifact\n'
+            printf -- '- artifact id: `%s`\n' "$ARTIFACT_ID"
+            printf -- '- artifact digest: `%s`\n' "$ARTIFACT_DIGEST"
+            printf -- '- artifact URL: %s\n' "$ARTIFACT_URL"
+          } >> "$GITHUB_STEP_SUMMARY"
