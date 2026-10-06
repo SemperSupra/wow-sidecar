@@ -233,6 +233,14 @@ jobs:
               .deployment_performed == false
             ' "$receipt" >/dev/null
 
+      - name: Exercise durable receipt artifact contract
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          path: ${{ runner.temp }}/publication-receipt-v2.synthetic.json
+          if-no-files-found: error
+          retention-days: 1
+          archive: false
+
   publish:
     if: github.event_name == 'workflow_dispatch'
     needs: qualify
