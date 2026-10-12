@@ -287,24 +287,17 @@ jobs:
 
           # 6. Structured receipt artifact generation
           mkdir -p "$RUNNER_TEMP/r2-artifacts"
-          cat > "$RUNNER_TEMP/r2-artifacts/r2-receipt-${{ matrix.goarch }}.json" <<EOF
-          {
-            "schema": "wow-sidecar.r2-qualification-receipt.v1",
-            "architecture": "${{ matrix.goarch }}",
-            "runner": "${{ matrix.runner }}",
-            "old_revision": "$old_sha",
-            "old_image": "$old_image",
-            "candidate_revision": "$sha",
-            "candidate_image": "wow-sidecar-go:native-${{ matrix.goarch }}",
-            "distinct_revisions_verified": true,
-            "overlap_concurrent_execution_verified": true,
-            "candidate_restart_generation": 2,
-            "rollback_old_instance_generation": 1,
-            "rollback_negative_probe_exit": $cand_down_rc,
-            "cleanup_exit": 0,
-            "cost_incremental_usd": 0.00
-          }
-EOF
+          jq -n \
+            --arg arch "${{ matrix.goarch }}" \
+            --arg runner "${{ matrix.runner }}" \
+            --arg old_sha "$old_sha" \
+            --arg old_image "$old_image" \
+            --arg cand_sha "$sha" \
+            --arg cand_image "wow-sidecar-go:native-${{ matrix.goarch }}" \
+            --argjson cand_restart_gen 2 \
+            --argjson rollback_old_gen 1 \
+            --argjson rollback_probe_rc "$cand_down_rc" \
+            '{schema: "wow-sidecar.r2-qualification-receipt.v1", architecture: $arch, runner: $runner, old_revision: $old_sha, old_image: $old_image, candidate_revision: $cand_sha, candidate_image: $cand_image, distinct_revisions_verified: true, overlap_concurrent_execution_verified: true, candidate_restart_generation: $cand_restart_gen, rollback_old_instance_generation: $rollback_old_gen, rollback_negative_probe_exit: $rollback_probe_rc, cleanup_exit: 0, cost_incremental_usd: 0.00}' > "$RUNNER_TEMP/r2-artifacts/r2-receipt-${{ matrix.goarch }}.json"
           jq . "$RUNNER_TEMP/r2-artifacts/r2-receipt-${{ matrix.goarch }}.json"
 
           # 7. Teardown and clean exit
