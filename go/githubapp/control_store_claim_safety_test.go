@@ -210,3 +210,166 @@ func TestControlStoreCreateClaimAmbiguousAndThrottled(t *testing.T) {
 		})
 	}
 }
+
+// Failure-injection: verify that authentication or authorization denials (401/403)
+// fail closed immediately without retry, and that no mutations occur.
+func TestControlStoreCreateClaimUnauthorizedOrForbidden(t *testing.T) {
+	const (
+		requestID = "synthetic-supra-claim-003"
+		sha       = "cccccccccccccccccccccccccccccccccccccccc"
+	)
+	for _, tc := range []struct {
+		name   string
+		status int
+	}{
+		{"unauthorized-token-revoked", http.StatusUnauthorized},
+		{"forbidden-insufficient-scope", http.StatusForbidden},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/repos/ExampleOrg/example-repo/installation":
+					fmt.Fprint(w, `{"id":77}`)
+				case r.Method == http.MethodPost && r.URL.Path == "/app/installations/77/access_tokens":
+					fmt.Fprint(w, `{"token":"scoped-synthetic-token"}`)
+				case r.Method == http.MethodPost && r.URL.Path == "/repos/ExampleOrg/example-repo/git/refs":
+					calls++
+					http.Error(w, "permission denied", tc.status)
+				case r.Method == http.MethodGet && r.URL.Path == "/repos/ExampleOrg/example-repo/git/matching-refs/heads/claims/":
+					fmt.Fprint(w, "[]")
+				default:
+					http.Error(w, "unexpected test API path", http.StatusBadRequest)
+				}
+			}))
+			defer server.Close()
+
+			client, err := New(Config{AppID: "12345", PrivateKey: testKey(t), APIBase: server.URL})
+			if err != nil {
+				t.Fatal(err)
+			}
+			store, err := NewControlStore(client, "ExampleOrg/example-repo")
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = store.CreateClaim(requestID, sha)
+			if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("HTTP %d", tc.status)) {
+				t.Fatalf("expected HTTP %d error, got %v", tc.status, err)
+			}
+			if calls != 1 {
+				t.Fatalf("expected exactly 1 call with zero uncoordinated retries, got %d", calls)
+			}
+			observed, err := store.RefMap("claims")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(observed) != 0 {
+				t.Fatalf("readback must reflect zero claims on auth failure, got %v", observed)
+			}
+		})
+	}
+}
+
+// Failure-injection: verify that when a competitor or tampered ref already exists with a conflicting SHA,
+// CreateClaim fails closed (HTTP 422) and diagnostic readback detects that the competitor's SHA differs
+// from the candidate's SHA, preventing false ownership.
+func TestControlStoreCreateClaimMismatchedReadback(t *testing.T) {
+	const (
+		requestID     = "synthetic-supra-claim-004"
+		candidateSHA  = "dddddddddddddddddddddddddddddddddddddddd"
+		competitorSHA = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+		claimRef      = "refs/heads/claims/" + requestID
+	)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/ExampleOrg/example-repo/installation":
+			fmt.Fprint(w, `{"id":77}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/app/installations/77/access_tokens":
+			fmt.Fprint(w, `{"token":"scoped-synthetic-token"}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/repos/ExampleOrg/example-repo/git/refs":
+			// Ref already exists (competitor won)
+			http.Error(w, "Reference already exists", http.StatusUnprocessableEntity)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/ExampleOrg/example-repo/git/matching-refs/heads/claims/":
+			// Returns the competitor's commit SHA
+			fmt.Fprintf(w, `[{"ref":%q,"object":{"sha":%q}}]`, claimRef, competitorSHA)
+		default:
+			http.Error(w, "unexpected test API path", http.StatusBadRequest)
+		}
+	}))
+	defer server.Close()
+
+	client, err := New(Config{AppID: "12345", PrivateKey: testKey(t), APIBase: server.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewControlStore(client, "ExampleOrg/example-repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = store.CreateClaim(requestID, candidateSHA)
+	if err == nil || !strings.Contains(err.Error(), "HTTP 422") {
+		t.Fatalf("expected HTTP 422 reference conflict, got %v", err)
+	}
+
+	observed, err := store.RefMap("claims")
+	if err != nil {
+		t.Fatal(err)
+	}
+	actualSHA, exists := observed[requestID]
+	if !exists {
+		t.Fatalf("expected competitor claim to be present in readback")
+	}
+	if actualSHA == candidateSHA {
+		t.Fatalf("readback must detect mismatched SHA, but matched candidate SHA: %s", actualSHA)
+	}
+	if actualSHA != competitorSHA {
+		t.Fatalf("expected competitor SHA %s, got %s", competitorSHA, actualSHA)
+	}
+}
+
+// Failure-injection: verify that malformed request IDs and commit SHAs fail closed
+// immediately without generating network requests.
+func TestControlStoreCreateClaimMalformedIdentity(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatalf("unexpected network call for malformed identity: %s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+
+	client, err := New(Config{AppID: "12345", PrivateKey: testKey(t), APIBase: server.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewControlStore(client, "ExampleOrg/example-repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, malformedID := range []string{
+		"",
+		"../path-traversal",
+		"has spaces",
+		"ref~with~tilde",
+		"ref^with^caret",
+		"ref:with:colon",
+		"-leading-dash",
+	} {
+		err := store.CreateClaim(malformedID, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+		if err == nil {
+			t.Fatalf("expected error for malformed request ID %q, got nil", malformedID)
+		}
+	}
+
+	for _, malformedSHA := range []string{
+		"",
+		"too-short",
+		"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", // uppercase
+		"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz", // non-hex
+	} {
+		err := store.CreateClaim("valid-request-id-001", malformedSHA)
+		if err == nil {
+			t.Fatalf("expected error for malformed SHA %q, got nil", malformedSHA)
+		}
+	}
+}
