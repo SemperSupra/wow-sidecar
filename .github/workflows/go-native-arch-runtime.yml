@@ -302,7 +302,7 @@ jobs:
           test "$residual_container_count" -eq 0
 
           # Clean up and verify host state directories
-          rm -rf "$state_old" "$state_candidate"
+          sudo rm -rf "$state_old" "$state_candidate"
           residual_state_count=0
           if [ -d "$state_old" ] || [ -d "$state_candidate" ]; then
             residual_state_count=1
