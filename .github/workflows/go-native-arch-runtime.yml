@@ -132,7 +132,7 @@ jobs:
                  and .generation == $generation'
             # R1 positive capability & control probes
             curl --fail --silent http://127.0.0.1:18080/v1/capabilities | jq -e '.schema == "wow-sidecar.capability-index.v1"'
-            curl --fail --silent http://127.0.0.1:18080/v1/capabilities/system.identity | jq -e '.status == "ok"'
+            curl --fail --silent http://127.0.0.1:18080/v1/capabilities/system.identity | jq -e '.result == "ELIGIBLE" and .status == "system-identity-observed"'
             curl --fail --silent http://127.0.0.1:18080/v1/control | jq -e '.enabled == false and .state == "DISABLED"'
 
             # R1 protocol negative controls
