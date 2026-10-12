@@ -32,11 +32,14 @@ class _GitDataHarness:
         self.trees = {}
         self.commits = {}
         self.events = []
+        self.malformed_claim_ref = False
 
     def handle(self, method, route, data):
         root = "/repos/test-org/test-repo"
         if route.startswith(root + "/git/ref/heads/"):
             ref = "refs/heads/" + route.removeprefix(root + "/git/ref/heads/")
+            if self.malformed_claim_ref and ref.startswith("refs/heads/claims/"):
+                return 200, {"object": {"type": "commit", "sha": "not-a-git-sha"}}
             with self.lock:
                 sha = self.refs.get(ref)
             return (200, {"ref": ref, "object": {"type": "commit", "sha": sha}}) if sha else (404, {"message": "not found"})
@@ -242,6 +245,13 @@ print(json.dumps(result.as_dict(), sort_keys=True))
         self.assertFalse(second["executed"])
         self.assertNotIn("HANDLER_FIRED", second_err)
         self.assertEqual(second["effect_digest"], first["effect_digest"])
+
+    def test_malformed_claim_read_stops_before_create_or_effect(self):
+        self.data.malformed_claim_ref = True
+        with self.assertRaises(EffectError):
+            self.executor(self.store()).process(self.request, self.runner_sha)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.data.events, [])
 
     def test_real_store_requires_live_callable_authority_validator(self):
         for validator in (None, self.revision, [self.revision]):
