@@ -43,6 +43,17 @@ class _GitDataHarness:
             with self.lock:
                 sha = self.refs.get(ref)
             return (200, {"ref": ref, "object": {"type": "commit", "sha": sha}}) if sha else (404, {"message": "not found"})
+        if method == "GET" and route.startswith(root + "/git/commits/"):
+            sha = route.removeprefix(root + "/git/commits/")
+            with self.lock:
+                record = self.commits.get(sha)
+            if record is None:
+                return 404, {"message": "not found"}
+            return 200, {
+                "sha": sha,
+                "parents": [{"sha": record["parent"]}],
+                "tree": {"sha": record["tree"]},
+            }
         if method == "GET" and route.startswith(root + "/contents/receipt.json"):
             qs = parse_qs(urlsplit(route).query)
             commit_sha = qs.get("ref", [""])[0]
@@ -179,6 +190,21 @@ class TestDurableGitHubEffectReceipts(unittest.TestCase):
         self.assertEqual(result.status, "CLAIM_REJECTED")
         self.assertEqual(result.verdict, "unknown")
         self.assertFalse(result.executed)
+        self.assertEqual(len(self.calls), 1)
+
+    def test_receipt_wrong_parent_fails_closed(self):
+        self.executor(self.store()).process(self.request, self.runner_sha)
+        receipt_commit = self.data.refs["refs/heads/receipts/" + self.request.request_id]
+        self.data.commits[receipt_commit]["parent"] = "c" * 40
+        with self.assertRaisesRegex(EffectError, "not bound"):
+            self.executor(self.store()).process(self.request, self.runner_sha)
+        self.assertEqual(len(self.calls), 1)
+
+    def test_receipt_without_claim_fails_closed(self):
+        self.executor(self.store()).process(self.request, self.runner_sha)
+        del self.data.refs["refs/heads/claims/" + self.request.request_id]
+        with self.assertRaisesRegex(EffectError, "without a durable claim"):
+            self.executor(self.store()).process(self.request, self.runner_sha)
         self.assertEqual(len(self.calls), 1)
 
     def test_missing_receipt_body_fails_closed_no_effect(self):

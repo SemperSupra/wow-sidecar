@@ -289,6 +289,30 @@ class GitHubRefClaimStore:
         if not isinstance(commit_sha, str) or not _SHA_RE.fullmatch(commit_sha):
             raise EffectError("receipt ref has invalid commit identity")
 
+        # A receipt ref alone is not accepted evidence: the referenced commit
+        # must have precisely one parent, the currently observed claim commit.
+        # This binds an existing receipt to the authority-bearing winner and
+        # refuses unrelated/rewritten Git Data without replaying the effect.
+        claim_sha = self.read_claim(request_id)
+        if claim_sha is None:
+            raise EffectError("receipt exists without a durable claim")
+        status, commit = self._http_request(
+            "GET", f"/repos/{self.owner}/{self.repo}/git/commits/{commit_sha}"
+        )
+        if status in (401, 403):
+            raise AuthorizationDeniedError(f"HTTP {status}: Access denied reading receipt commit")
+        if status != 200:
+            raise AmbiguousClaimError(f"HTTP {status}: Receipt ancestry cannot be established")
+        parents = commit.get("parents")
+        if (
+            commit.get("sha") != commit_sha
+            or not isinstance(parents, list)
+            or len(parents) != 1
+            or not isinstance(parents[0], dict)
+            or parents[0].get("sha") != claim_sha
+        ):
+            raise EffectError("receipt commit is not bound to the expected claim")
+
         from urllib.parse import quote
         contents = (
             f"/repos/{self.owner}/{self.repo}/contents/receipt.json"
