@@ -9,6 +9,8 @@ import base64
 import hashlib
 import http.server
 import json
+import subprocess
+import sys
 import threading
 import unittest
 from urllib.parse import parse_qs, urlsplit
@@ -194,6 +196,52 @@ class TestDurableGitHubEffectReceipts(unittest.TestCase):
         self.assertEqual(len(self.calls), 0)
         self.assertIn("refs/heads/claims/" + self.request.request_id, self.data.refs)
         self.assertNotIn("refs/heads/receipts/" + self.request.request_id, self.data.refs)
+
+    def test_separate_interpreters_recover_durable_receipt(self):
+        # Parent owns only synthetic Git Data HTTP state; process A's memory
+        # is discarded before B observes the same durable Git receipt ref.
+        source = """import json, sys
+from wow_sidecar.idempotent_github_effect import (
+    EffectRequest, GitHubRefClaimStore, IdempotentEffectExecutor
+)
+request = EffectRequest(
+    request_id="durable-suprasession-001",
+    workset_ref="public-synthetic-workstream",
+    authority_revision="a" * 40,
+    operator_profile="public-synthetic",
+    payload={"sequence": 1},
+)
+def effect(_):
+    print("HANDLER_FIRED", file=sys.stderr)
+    return ("eligible", {"accepted": True, "request_id": request.request_id})
+store = GitHubRefClaimStore(
+    repo="test-org/test-repo", token="synthetic-only", api_base=sys.argv[1],
+)
+executor = IdempotentEffectExecutor(
+    store, effect, authority_validator=lambda rev: rev == "a" * 40
+)
+result = executor.process(request, "b" * 40)
+print(json.dumps(result.as_dict(), sort_keys=True))
+"""
+        def fresh_run():
+            completed = subprocess.run(
+                [sys.executable, "-c", source, self.api_base],
+                check=True, capture_output=True, text=True,
+                timeout=20,
+            )
+            return json.loads(completed.stdout), completed.stderr
+
+        first, first_err = fresh_run()
+        self.assertEqual(first["status"], "EXECUTION_COMPLETE")
+        self.assertIn("HANDLER_FIRED", first_err)
+        ref = self.data.refs["refs/heads/receipts/" + self.request.request_id]
+        self.assertEqual(self.data.commits[ref]["parent"], self.runner_sha)
+
+        second, second_err = fresh_run()
+        self.assertEqual(second["status"], "ALREADY_RECEIPTED")
+        self.assertFalse(second["executed"])
+        self.assertNotIn("HANDLER_FIRED", second_err)
+        self.assertEqual(second["effect_digest"], first["effect_digest"])
 
     def test_real_store_requires_live_callable_authority_validator(self):
         for validator in (None, self.revision, [self.revision]):
