@@ -242,7 +242,7 @@ class GitHubRefClaimStore:
             sha = obj.get("sha")
             if isinstance(sha, str) and _SHA_RE.fullmatch(sha):
                 return sha
-            return None
+            raise EffectError("claim ref returned malformed identity")
         if status == 404:
             return None
         if status in (401, 403):
