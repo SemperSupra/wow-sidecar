@@ -1,0 +1,14 @@
+{
+  "schema": "suprasession.native-github-cas-qualification.v1",
+  "request_id": "suprasession-rdte-cas-20261012-001",
+  "authority_ref": "SemperSupra/agent-dispatch-private#92",
+  "claim_ref": "refs/heads/claims/suprasession-rdte-cas-20261012-001",
+  "claim_commit_sha": "86891777c37116393760d844dad0dc1ca8e835bb",
+  "provider": "github-git-data",
+  "observed": "CREATE_ONCE_REF_DUPLICATE_REJECTED_HTTP_422",
+  "real_side_effect_executed": false,
+  "dedicated_wow_github_app_used": false,
+  "synthetic_public_safe": true,
+  "accepted_gates": [],
+  "disposition": "QUALIFICATION_ONLY_NOT_GATE_A_OR_B"
+}
