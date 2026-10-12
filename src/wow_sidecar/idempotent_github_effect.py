@@ -16,6 +16,7 @@ It explicitly distinguishes three boundaries:
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import re
@@ -200,7 +201,7 @@ class GitHubRefClaimStore:
         self.opener = opener or urllib.request.urlopen
         self.claim_ref_prefix = claim_ref_prefix
         self.receipt_ref_prefix = receipt_ref_prefix
-        self._cached_receipts: dict[str, EffectReceipt] = {}
+
 
     def _http_request(
         self,
@@ -248,9 +249,11 @@ class GitHubRefClaimStore:
             raise AuthorizationDeniedError(f"HTTP {status}: Access denied reading claim")
         if status in (429, 504):
             raise AmbiguousClaimError(f"HTTP {status}: Inconclusive claim read")
-        return None
+        raise AmbiguousClaimError(f"HTTP {status}: Unable to establish claim state")
 
     def create_claim(self, request_id: str, request_sha: str) -> None:
+        if not _REQUEST_ID_RE.fullmatch(request_id):
+            raise EffectError("invalid request_id")
         if not _SHA_RE.fullmatch(request_sha):
             raise EffectError(f"invalid request_sha: {request_sha}")
 
@@ -271,22 +274,115 @@ class GitHubRefClaimStore:
         raise EffectError(f"unexpected HTTP {status} creating claim: {data}")
 
     def read_receipt(self, request_id: str) -> EffectReceipt | None:
-        # Check local cache first
-        if request_id in self._cached_receipts:
-            return self._cached_receipts[request_id]
-
+        """Read immutable Git-backed receipt across processes; no memory cache."""
+        if not _REQUEST_ID_RE.fullmatch(request_id):
+            raise EffectError("invalid request_id")
         path = f"/repos/{self.owner}/{self.repo}/git/ref/heads/receipts/{request_id}"
-        status, _ = self._http_request("GET", path)
+        status, found = self._http_request("GET", path)
         if status == 404:
             return None
-        if status == 200:
-            return self._cached_receipts.get(request_id)
         if status in (401, 403):
             raise AuthorizationDeniedError(f"HTTP {status}: Access denied reading receipt")
-        return None
+        if status != 200:
+            raise AmbiguousClaimError(f"HTTP {status}: Unable to establish receipt state")
+        commit_sha = found.get("object", {}).get("sha")
+        if not isinstance(commit_sha, str) or not _SHA_RE.fullmatch(commit_sha):
+            raise EffectError("receipt ref has invalid commit identity")
+
+        from urllib.parse import quote
+        contents = (
+            f"/repos/{self.owner}/{self.repo}/contents/receipt.json"
+            f"?ref={quote(commit_sha, safe='')}"
+        )
+        status, payload = self._http_request("GET", contents)
+        if status in (401, 403):
+            raise AuthorizationDeniedError(f"HTTP {status}: Access denied reading receipt body")
+        if status != 200:
+            raise AmbiguousClaimError(f"HTTP {status}: Receipt body unavailable")
+        if payload.get("type") != "file" or payload.get("encoding") != "base64":
+            raise EffectError("receipt body is not a base64 GitHub file")
+        encoded = payload.get("content")
+        if not isinstance(encoded, str):
+            raise EffectError("receipt body content is missing")
+        try:
+            raw = base64.b64decode("".join(encoded.split()), validate=True)
+            data = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeError) as exc:
+            raise EffectError("receipt body is malformed") from exc
+        if not isinstance(data, dict):
+            raise EffectError("receipt body must be a JSON object")
+        if data.get("schema") != "agent-dispatch.idempotent-effect-receipt.v1":
+            raise EffectError("receipt schema mismatch")
+        if data.get("request_id") != request_id:
+            raise EffectError("receipt identity does not match requested id")
+        if not isinstance(data.get("executed"), bool) or not isinstance(data.get("retry_authorized"), bool):
+            raise EffectError("receipt boolean fields are malformed")
+        for key in ("request_digest", "status", "verdict", "effect_digest"):
+            if not isinstance(data.get(key), str):
+                raise EffectError(f"receipt field {key} missing or malformed")
+        if not isinstance(data.get("details"), dict):
+            raise EffectError("receipt details must be an object")
+        try:
+            return EffectReceipt(**data)
+        except TypeError as exc:
+            raise EffectError("receipt fields do not match schema") from exc
 
     def persist_receipt(self, receipt: EffectReceipt) -> None:
-        self._cached_receipts[receipt.request_id] = receipt
+        """Write blob/tree/commit/create-once ref as existing Go ControlStore does.
+
+        The ref's commit is parent-bound to the exact claim commit. The
+        successful create-ref is the *only* durable receipt acknowledgment.
+        A partial/ambiguous API failure remains UNKNOWN and must not retry
+        any consequential effect.
+        """
+        if not _REQUEST_ID_RE.fullmatch(receipt.request_id):
+            raise EffectError("invalid receipt request_id")
+        if receipt.schema != "agent-dispatch.idempotent-effect-receipt.v1":
+            raise EffectError("invalid receipt schema")
+        claim_sha = self.read_claim(receipt.request_id)
+        if not claim_sha or not _SHA_RE.fullmatch(claim_sha):
+            raise EffectError("cannot persist receipt without a durable claim")
+        base = f"/repos/{self.owner}/{self.repo}"
+        raw = canonical_json(receipt.as_dict())
+        status, blob = self._http_request(
+            "POST", f"{base}/git/blobs",
+            {"content": raw.decode("utf-8"), "encoding": "utf-8"},
+        )
+        if status not in (200, 201):
+            raise AmbiguousClaimError(f"HTTP {status}: receipt blob not confirmed")
+        blob_sha = blob.get("sha")
+        if not isinstance(blob_sha, str) or not _SHA_RE.fullmatch(blob_sha):
+            raise EffectError("receipt blob identity missing")
+        status, tree = self._http_request(
+            "POST", f"{base}/git/trees",
+            {"tree": [{"path": "receipt.json", "mode": "100644", "type": "blob", "sha": blob_sha}]},
+        )
+        if status not in (200, 201):
+            raise AmbiguousClaimError(f"HTTP {status}: receipt tree not confirmed")
+        tree_sha = tree.get("sha")
+        if not isinstance(tree_sha, str) or not _SHA_RE.fullmatch(tree_sha):
+            raise EffectError("receipt tree identity missing")
+        status, commit = self._http_request(
+            "POST", f"{base}/git/commits",
+            {"message": f"record idempotent effect receipt {receipt.request_id}",
+             "tree": tree_sha, "parents": [claim_sha]},
+        )
+        if status not in (200, 201):
+            raise AmbiguousClaimError(f"HTTP {status}: receipt commit not confirmed")
+        commit_sha = commit.get("sha")
+        if not isinstance(commit_sha, str) or not _SHA_RE.fullmatch(commit_sha):
+            raise EffectError("receipt commit identity missing")
+        status, _ = self._http_request(
+            "POST", f"{base}/git/refs",
+            {"ref": f"{self.receipt_ref_prefix}{receipt.request_id}", "sha": commit_sha},
+        )
+        if status == 201:
+            return
+        if status == 422:
+            raise ClaimConflictError("receipt ref already exists")
+        if status in (401, 403):
+            raise AuthorizationDeniedError(f"HTTP {status}: receipt publication denied")
+        raise AmbiguousClaimError(f"HTTP {status}: receipt publication unconfirmed")
 
 
 class IdempotentEffectExecutor:
@@ -311,7 +407,7 @@ class IdempotentEffectExecutor:
 
     def _validate_authority(self, authority_revision: str) -> bool:
         if self.authority_validator is None:
-            return True
+            return False
         if callable(self.authority_validator):
             return bool(self.authority_validator(authority_revision))
         if isinstance(self.authority_validator, str):
@@ -333,6 +429,8 @@ class IdempotentEffectExecutor:
         """
         if not _SHA_RE.fullmatch(runner_sha):
             raise EffectError("runner_sha must be a 40-hex Git SHA")
+        if isinstance(self.store, GitHubRefClaimStore) and not callable(self.authority_validator):
+            raise EffectError("real GitHub effects require a live callable authority validator")
 
         # Step 0: Validate authority revision (fail-closed before claim/effect)
         if not self._validate_authority(request.authority_revision):
@@ -354,6 +452,18 @@ class IdempotentEffectExecutor:
         # Step 1: Check existing receipt (read-before-execute idempotency)
         existing_receipt = self.store.read_receipt(request.request_id)
         if existing_receipt is not None:
+            if existing_receipt.request_digest != request.content_digest:
+                return EffectReceipt(
+                    schema="agent-dispatch.idempotent-effect-receipt.v1",
+                    request_id=request.request_id,
+                    request_digest=request.content_digest,
+                    status="CLAIM_REJECTED",
+                    verdict="unknown",
+                    effect_digest="sha256:none",
+                    executed=False,
+                    retry_authorized=False,
+                    details={"reason": "same_id_different_request_digest"},
+                )
             return EffectReceipt(
                 schema="agent-dispatch.idempotent-effect-receipt.v1",
                 request_id=request.request_id,
@@ -414,6 +524,21 @@ class IdempotentEffectExecutor:
         # Simulated crash after claim before effect
         if self.injected_crash == "crash_after_claim":
             raise CrashInjectionError("injected crash after claim before effect")
+
+        # Reconcile owner authority again immediately before the effect.
+        # The claim remains held if authority was revoked after acquisition.
+        if not self._validate_authority(request.authority_revision):
+            return EffectReceipt(
+                schema="agent-dispatch.idempotent-effect-receipt.v1",
+                request_id=request.request_id,
+                request_digest=request.content_digest,
+                status="AUTHORITY_REJECTED",
+                verdict="unknown",
+                effect_digest="sha256:none",
+                executed=False,
+                retry_authorized=False,
+                details={"reason": "authority_revoked_after_claim"},
+            )
 
         # Step 4: Execute the consequential effect
         try:
