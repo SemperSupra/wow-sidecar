@@ -164,6 +164,11 @@ jobs:
           docker pull "$old_image"
           test "$sha" != "$old_sha"
 
+          old_image_id="$(docker inspect -f '{{.Id}}' "$old_image")"
+          old_repo_digest="$(docker inspect -f '{{index .RepoDigests 0}}' "$old_image" 2>/dev/null || echo "$old_image")"
+          cand_image="wow-sidecar-go:native-${{ matrix.goarch }}"
+          cand_image_id="$(docker inspect -f '{{.Id}}' "$cand_image")"
+
           state_old="$RUNNER_TEMP/wow-r2-state-old-${{ matrix.goarch }}"
           state_candidate="$RUNNER_TEMP/wow-r2-state-candidate-${{ matrix.goarch }}"
           install -d -m 0700 "$state_old" "$state_candidate"
@@ -285,27 +290,65 @@ jobs:
                and .node_id == ("ci-old-" + $arch + "-node")
                and .generation == 1'
 
-          # 6. Structured receipt artifact generation
+          # 6. Teardown Old instance and witness post-cleanup state
+          docker stop "$name_old" >/dev/null 2>&1 || true
+          docker rm "$name_old" >/dev/null 2>&1 || true
+          cleanup_r2
+          cleanup_rc=$?
+          lingering_containers="$(docker ps -q --filter name=wow-sidecar-r2)"
+          test -z "$lingering_containers"
+          test "$cleanup_rc" -eq 0
+          trap - EXIT
+
+          # 7. Structured receipt artifact generation (witnessed post-cleanup)
           mkdir -p "$RUNNER_TEMP/r2-artifacts"
+          receipt_file="$RUNNER_TEMP/r2-artifacts/r2-receipt-${{ matrix.goarch }}.json"
           jq -n \
+            --arg schema "wow-sidecar.r2-qualification-receipt.v2" \
             --arg arch "${{ matrix.goarch }}" \
             --arg runner "${{ matrix.runner }}" \
             --arg old_sha "$old_sha" \
-            --arg old_image "$old_image" \
+            --arg old_image_ref "$old_image" \
+            --arg old_image_id "$old_image_id" \
+            --arg old_image_repo_digest "$old_repo_digest" \
             --arg cand_sha "$sha" \
-            --arg cand_image "wow-sidecar-go:native-${{ matrix.goarch }}" \
+            --arg cand_image_ref "$cand_image" \
+            --arg cand_image_id "$cand_image_id" \
             --argjson cand_restart_gen 2 \
             --argjson rollback_old_gen 1 \
             --argjson rollback_probe_rc "$cand_down_rc" \
-            '{schema: "wow-sidecar.r2-qualification-receipt.v1", architecture: $arch, runner: $runner, old_revision: $old_sha, old_image: $old_image, candidate_revision: $cand_sha, candidate_image: $cand_image, distinct_revisions_verified: true, overlap_concurrent_execution_verified: true, candidate_restart_generation: $cand_restart_gen, rollback_old_instance_generation: $rollback_old_gen, rollback_negative_probe_exit: $rollback_probe_rc, cleanup_exit: 0, cost_incremental_usd: 0.00}' > "$RUNNER_TEMP/r2-artifacts/r2-receipt-${{ matrix.goarch }}.json"
-          jq . "$RUNNER_TEMP/r2-artifacts/r2-receipt-${{ matrix.goarch }}.json"
-
-          # 7. Teardown and clean exit
-          docker stop "$name_old" >/dev/null
-          docker rm "$name_old" >/dev/null
-          test -z "$(docker ps -q --filter name=wow-sidecar-r2)"
-          trap - EXIT
-          cleanup_r2
+            --argjson cleanup_exit "$cleanup_rc" \
+            --argjson lingering_containers 0 \
+            --arg cleanup_witnessed "true" \
+            --arg cost_status "ESTIMATED_ZERO_INCREMENTAL_PUBLIC_ALLOWANCE" \
+            --arg cost_billing_verified "false" \
+            --arg cost_rationale "Standard public repository GitHub-hosted runner execution; unmeasured by external billing API" \
+            '{
+              schema: $schema,
+              architecture: $arch,
+              runner: $runner,
+              old_revision: $old_sha,
+              old_image_ref: $old_image_ref,
+              old_image_id: $old_image_id,
+              old_image_repo_digest: $old_image_repo_digest,
+              candidate_revision: $cand_sha,
+              candidate_image_ref: $cand_image_ref,
+              candidate_image_id: $cand_image_id,
+              distinct_revisions_verified: true,
+              overlap_concurrent_execution_verified: true,
+              candidate_restart_generation: $cand_restart_gen,
+              rollback_old_instance_generation: $rollback_old_gen,
+              rollback_negative_probe_exit: $rollback_probe_rc,
+              cleanup_exit: $cleanup_exit,
+              lingering_containers_count: $lingering_containers,
+              cleanup_witnessed: ($cleanup_witnessed == "true"),
+              cost_status: $cost_status,
+              cost_billing_verified: ($cost_billing_verified == "true"),
+              cost_rationale: $cost_rationale
+            }' > "$receipt_file"
+          receipt_sha="$(sha256sum "$receipt_file" | cut -d' ' -f1)"
+          echo "RECEIPT_INNER_SHA256=$receipt_sha"
+          jq . "$receipt_file"
 
       - name: Retain R2 qualification receipt artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
