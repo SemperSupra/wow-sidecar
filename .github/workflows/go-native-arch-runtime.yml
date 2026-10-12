@@ -138,3 +138,139 @@ jobs:
           run_generation 2
           trap - EXIT
           cleanup
+
+      - name: R2 concurrent-instance revision-overlap restart and rollback qualification
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          version="0.0.0-dev.${sha:0:12}"
+
+          state_old="$RUNNER_TEMP/wow-r2-state-old-${{ matrix.goarch }}"
+          state_candidate="$RUNNER_TEMP/wow-r2-state-candidate-${{ matrix.goarch }}"
+          install -d -m 0700 "$state_old" "$state_candidate"
+          sudo chown 10001:10001 "$state_old" "$state_candidate"
+          name_old="wow-sidecar-r2-old-${{ matrix.goarch }}"
+          name_candidate="wow-sidecar-r2-candidate-${{ matrix.goarch }}"
+
+          cleanup_r2() {
+            docker rm -f "$name_old" "$name_candidate" >/dev/null 2>&1 || true
+          }
+          trap cleanup_r2 EXIT
+          cleanup_r2
+
+          # 1. Start Old generation-1 instance on port 18080
+          docker run -d \
+            --name "$name_old" \
+            --read-only \
+            --mount "type=bind,src=$state_old,dst=/var/lib/wow-sidecar" \
+            -e "WOW_NODE_ID=ci-old-${{ matrix.goarch }}-node" \
+            -e WOW_LOCALITY=cloud \
+            -e WOW_LISTEN_ADDR=0.0.0.0:8080 \
+            -p 127.0.0.1:18080:8080 \
+            "wow-sidecar-go:native-${{ matrix.goarch }}" >/dev/null
+
+          ready_old=false
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:18080/healthz >/tmp/r2-health-old.json; then
+              ready_old=true
+              break
+            fi
+            sleep 1
+          done
+          test "$ready_old" = true
+          jq -e --arg sha "$sha" \
+            '.status == "ok" and .source_revision == $sha and .generation == 1' \
+            /tmp/r2-health-old.json
+          curl --fail --silent http://127.0.0.1:18080/readyz | jq -e '.status == "ready"'
+          curl --fail --silent http://127.0.0.1:18080/v1/card | \
+            jq -e --arg arch "${{ matrix.goarch }}" \
+              '.schema == "wow-sidecar.embodiment-card.v1"
+               and .node_id == ("ci-old-" + $arch + "-node")
+               and .generation == 1'
+
+          # 2. Concurrently start Candidate instance on port 18081 (Revision overlap window)
+          docker run -d \
+            --name "$name_candidate" \
+            --read-only \
+            --mount "type=bind,src=$state_candidate,dst=/var/lib/wow-sidecar" \
+            -e "WOW_NODE_ID=ci-candidate-${{ matrix.goarch }}-node" \
+            -e WOW_LOCALITY=cloud \
+            -e WOW_LISTEN_ADDR=0.0.0.0:8080 \
+            -p 127.0.0.1:18081:8080 \
+            "wow-sidecar-go:native-${{ matrix.goarch }}" >/dev/null
+
+          ready_cand=false
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:18081/healthz >/tmp/r2-health-candidate.json; then
+              ready_cand=true
+              break
+            fi
+            sleep 1
+          done
+          test "$ready_cand" = true
+          jq -e --arg sha "$sha" \
+            '.status == "ok" and .source_revision == $sha and .generation == 1' \
+            /tmp/r2-health-candidate.json
+          curl --fail --silent http://127.0.0.1:18081/readyz | jq -e '.status == "ready"'
+          curl --fail --silent http://127.0.0.1:18081/v1/card | \
+            jq -e --arg arch "${{ matrix.goarch }}" \
+              '.schema == "wow-sidecar.embodiment-card.v1"
+               and .node_id == ("ci-candidate-" + $arch + "-node")
+               and .generation == 1'
+
+          # 3. Assert simultaneous co-residence and mutual isolation
+          test "$(docker inspect -f '{{.State.Running}}' "$name_old")" = "true"
+          test "$(docker inspect -f '{{.State.Running}}' "$name_candidate")" = "true"
+          curl --fail --silent http://127.0.0.1:18080/readyz | jq -e '.status == "ready"'
+          curl --fail --silent http://127.0.0.1:18081/readyz | jq -e '.status == "ready"'
+          docker stats --no-stream --format 'container={{.Name}} memory={{.MemUsage}} cpu={{.CPUPerc}}' "$name_old" "$name_candidate"
+
+          # 4. Restart candidate instance and assert generation increments to 2 while old remains undisturbed
+          docker restart "$name_candidate" >/dev/null
+          curl --fail --silent http://127.0.0.1:18080/readyz | jq -e '.status == "ready"'
+
+          ready_cand_restart=false
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:18081/healthz >/tmp/r2-health-candidate-gen2.json; then
+              ready_cand_restart=true
+              break
+            fi
+            sleep 1
+          done
+          test "$ready_cand_restart" = true
+          jq -e --arg sha "$sha" \
+            '.status == "ok" and .source_revision == $sha and .generation == 2' \
+            /tmp/r2-health-candidate-gen2.json
+          curl --fail --silent http://127.0.0.1:18081/readyz | jq -e '.status == "ready"'
+          curl --fail --silent http://127.0.0.1:18081/v1/card | \
+            jq -e --arg arch "${{ matrix.goarch }}" \
+              '.schema == "wow-sidecar.embodiment-card.v1"
+               and .node_id == ("ci-candidate-" + $arch + "-node")
+               and .generation == 2'
+
+          # 5. Rollback qualification: terminate candidate, verify candidate port is down (negative control), assert old instance remains active
+          docker stop "$name_candidate" >/dev/null
+          docker rm "$name_candidate" >/dev/null
+
+          set +e
+          curl --fail --silent http://127.0.0.1:18081/healthz >/dev/null 2>&1
+          cand_down_rc=$?
+          set -e
+          test "$cand_down_rc" -ne 0
+
+          curl --fail --silent http://127.0.0.1:18080/healthz | jq -e '.status == "ok" and .generation == 1'
+          curl --fail --silent http://127.0.0.1:18080/readyz | jq -e '.status == "ready"'
+          curl --fail --silent http://127.0.0.1:18080/v1/card | \
+            jq -e --arg arch "${{ matrix.goarch }}" \
+              '.schema == "wow-sidecar.embodiment-card.v1"
+               and .node_id == ("ci-old-" + $arch + "-node")
+               and .generation == 1'
+
+          # 6. Teardown and clean exit
+          docker stop "$name_old" >/dev/null
+          docker rm "$name_old" >/dev/null
+          test -z "$(docker ps -q --filter name=wow-sidecar-r2)"
+          trap - EXIT
+          cleanup_r2
+
