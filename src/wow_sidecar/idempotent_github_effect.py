@@ -367,7 +367,22 @@ class GitHubRefClaimStore:
         if status == 201:
             return
         if status == 422:
-            raise ClaimConflictError(f"HTTP 422: Ref {self.claim_ref_prefix}{request_id} already exists")
+            # GitHub also uses 422 for invalid SHA/ref and other validation
+            # errors. Do not claim that a competitor owns this request until
+            # an independent read confirms that the exact ref exists.
+            try:
+                observed = self.read_claim(request_id)
+            except (AmbiguousClaimError, AuthorizationDeniedError) as exc:
+                raise AmbiguousClaimError(
+                    "HTTP 422: existing claim could not be verified"
+                ) from exc
+            if observed is None:
+                raise AmbiguousClaimError(
+                    "HTTP 422: no existing claim ref; validation outcome unresolved"
+                )
+            raise ClaimConflictError(
+                f"HTTP 422: verified existing claim {self.claim_ref_prefix}{request_id}"
+            )
         if status in (401, 403):
             raise AuthorizationDeniedError(f"HTTP {status}: Access denied creating claim")
         if status in (429, 504):
