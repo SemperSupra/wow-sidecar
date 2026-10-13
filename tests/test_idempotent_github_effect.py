@@ -76,6 +76,27 @@ class TestIdempotentGitHubEffect(unittest.TestCase):
         )
         self.runner_sha = "1111111111111111111111111111111111111111"
 
+    def test_absent_authority_validator_fails_closed_before_claim(self) -> None:
+        executor = IdempotentEffectExecutor(self.store, self.handler)
+        receipt = executor.process(self.request, self.runner_sha)
+        self.assertEqual(receipt.status, "AUTHORITY_REJECTED")
+        self.assertFalse(receipt.executed)
+        self.assertFalse(receipt.retry_authorized)
+        self.assertEqual(self.handler.call_count, 0)
+        self.assertIsNone(self.store.read_claim(self.request.request_id))
+
+    def test_unsupported_authority_validator_fails_closed_before_claim(self) -> None:
+        for unsupported in (True, 123, object()):
+            executor = IdempotentEffectExecutor(
+                self.store, self.handler, authority_validator=unsupported,
+            )
+            receipt = executor.process(self.request, self.runner_sha)
+            self.assertEqual(receipt.status, "AUTHORITY_REJECTED")
+            self.assertFalse(receipt.executed)
+            self.assertFalse(receipt.retry_authorized)
+            self.assertEqual(self.handler.call_count, 0)
+            self.assertIsNone(self.store.read_claim(self.request.request_id))
+
     # Vector 1: Claim Ownership
     def test_claim_ownership_only_claimant_executes(self) -> None:
         receipt = self.executor.process(self.request, self.runner_sha)

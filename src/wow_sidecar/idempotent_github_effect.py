@@ -438,7 +438,9 @@ class IdempotentEffectExecutor:
             return authority_revision == self.authority_validator
         if isinstance(self.authority_validator, (set, list, tuple)):
             return authority_revision in self.authority_validator
-        return True
+        # Reject unsupported validator types rather than silently granting
+        # an actor's effects unbounded authority.
+        return False
 
     def process(self, request: EffectRequest, runner_sha: str) -> EffectReceipt:
         """Process an execution request following the CAS claim->effect->receipt lifecycle.
