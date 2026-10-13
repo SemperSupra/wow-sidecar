@@ -346,6 +346,31 @@ class GitHubRefClaimStore:
                 raise EffectError(f"receipt field {key} missing or malformed")
         if not isinstance(data.get("details"), dict):
             raise EffectError("receipt details must be an object")
+        if not isinstance(data["request_digest"], str) or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}", data["request_digest"]
+        ):
+            raise EffectError("receipt request digest is invalid")
+        # Only terminal execution evidence is durably persisted. A fabricated
+        # ALREADY_RECEIPTED or inconsistent terminal receipt must never be
+        # promoted to independent evidence of a prior effect.
+        if data["retry_authorized"]:
+            raise EffectError("stored receipt authorizes an unsafe retry")
+        if data["status"] == "EXECUTION_COMPLETE":
+            if (
+                not data["executed"]
+                or data["verdict"] not in ("eligible", "rejected", "unknown")
+                or data["effect_digest"] != sha256_digest(canonical_json(data["details"]))
+            ):
+                raise EffectError("completed receipt has inconsistent effect evidence")
+        elif data["status"] == "EXECUTION_FAILED":
+            if (
+                data["executed"]
+                or data["verdict"] != "unknown"
+                or data["effect_digest"] != "sha256:none"
+            ):
+                raise EffectError("failed receipt has inconsistent effect evidence")
+        else:
+            raise EffectError("receipt status is not a durable terminal outcome")
         try:
             return EffectReceipt(**data)
         except TypeError as exc:

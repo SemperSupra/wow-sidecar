@@ -192,6 +192,35 @@ class TestDurableGitHubEffectReceipts(unittest.TestCase):
         self.assertFalse(result.executed)
         self.assertEqual(len(self.calls), 1)
 
+    def _corrupt_receipt_body(self, changes):
+        receipt_commit = self.data.refs["refs/heads/receipts/" + self.request.request_id]
+        tree_sha = self.data.commits[receipt_commit]["tree"]
+        blob_sha = self.data.trees[tree_sha]
+        stored = json.loads(self.data.blobs[blob_sha].decode("utf-8"))
+        stored.update(changes)
+        self.data.blobs[blob_sha] = canonical_json(stored)
+
+    def test_changed_receipt_effect_digest_fails_closed(self):
+        self.executor(self.store()).process(self.request, self.runner_sha)
+        self._corrupt_receipt_body({"effect_digest": "sha256:" + ("0" * 64)})
+        with self.assertRaisesRegex(EffectError, "inconsistent effect evidence"):
+            self.executor(self.store()).process(self.request, self.runner_sha)
+        self.assertEqual(len(self.calls), 1)
+
+    def test_inconsistent_terminal_status_fails_closed(self):
+        self.executor(self.store()).process(self.request, self.runner_sha)
+        self._corrupt_receipt_body({"executed": False})
+        with self.assertRaisesRegex(EffectError, "inconsistent effect evidence"):
+            self.executor(self.store()).process(self.request, self.runner_sha)
+        self.assertEqual(len(self.calls), 1)
+
+    def test_forged_duplicate_receipt_status_fails_closed(self):
+        self.executor(self.store()).process(self.request, self.runner_sha)
+        self._corrupt_receipt_body({"status": "ALREADY_RECEIPTED"})
+        with self.assertRaisesRegex(EffectError, "not a durable terminal outcome"):
+            self.executor(self.store()).process(self.request, self.runner_sha)
+        self.assertEqual(len(self.calls), 1)
+
     def test_receipt_wrong_parent_fails_closed(self):
         self.executor(self.store()).process(self.request, self.runner_sha)
         receipt_commit = self.data.refs["refs/heads/receipts/" + self.request.request_id]
