@@ -20,6 +20,7 @@ import base64
 import hashlib
 import json
 import re
+import threading
 import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass, field
@@ -57,20 +58,45 @@ class CrashInjectionError(EffectError):
 
 def canonical_json(value: Any) -> bytes:
     """Deterministic JSON serialization matching Agent Dispatch / WOW protocol."""
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
 
 
 def sha256_digest(content: bytes) -> str:
     return "sha256:" + hashlib.sha256(content).hexdigest()
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class EffectRequest:
     request_id: str
     workset_ref: str
     authority_revision: str
     operator_profile: str
-    payload: dict[str, Any]
+    _payload_json: bytes = field(repr=False)
+
+    def __init__(self, request_id: str, workset_ref: str, authority_revision: str,
+                 operator_profile: str, payload: dict[str, Any]) -> None:
+        if not isinstance(payload, dict):
+            raise EffectError("payload must be a dictionary")
+        for name, value in (("request_id", request_id), ("workset_ref", workset_ref),
+                            ("authority_revision", authority_revision), ("operator_profile", operator_profile)):
+            if not isinstance(value, str):
+                raise EffectError(f"{name} must be a string")
+            object.__setattr__(self, name, value)
+        try:
+            object.__setattr__(self, "_payload_json", canonical_json(payload))
+        except (TypeError, ValueError) as exc:
+            raise EffectError("payload must be finite JSON") from exc
+        self.__post_init__()
+
+    @property
+    def payload(self) -> dict[str, Any]:
+        """Detached JSON view: caller/handler mutation cannot change identity."""
+        return json.loads(self._payload_json)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"request_id": self.request_id, "workset_ref": self.workset_ref,
+                "authority_revision": self.authority_revision,
+                "operator_profile": self.operator_profile, "payload": self.payload}
 
     def __post_init__(self) -> None:
         if not _REQUEST_ID_RE.fullmatch(self.request_id):
@@ -86,7 +112,7 @@ class EffectRequest:
 
     @property
     def content_digest(self) -> str:
-        return sha256_digest(canonical_json(asdict(self)))
+        return sha256_digest(canonical_json(self.as_dict()))
 
     @property
     def claim_ref(self) -> str:
@@ -113,6 +139,49 @@ class EffectReceipt:
         return asdict(self)
 
 
+def validate_receipt(data: dict[str, Any], request_id: str) -> EffectReceipt:
+    if data.get("schema") != "agent-dispatch.idempotent-effect-receipt.v1":
+        raise EffectError("receipt schema mismatch")
+    if data.get("request_id") != request_id:
+        raise EffectError("receipt identity does not match requested id")
+    if not isinstance(data.get("executed"), bool) or not isinstance(data.get("retry_authorized"), bool):
+        raise EffectError("receipt boolean fields are malformed")
+    for key in ("request_digest", "status", "verdict", "effect_digest"):
+        if not isinstance(data.get(key), str):
+            raise EffectError(f"receipt field {key} missing or malformed")
+    if not isinstance(data.get("details"), dict):
+        raise EffectError("receipt details must be an object")
+    if not isinstance(data["request_digest"], str) or not re.fullmatch(
+        r"sha256:[0-9a-f]{64}", data["request_digest"]
+    ):
+        raise EffectError("receipt request digest is invalid")
+    # Only terminal execution evidence is durably persisted. A fabricated
+    # ALREADY_RECEIPTED or inconsistent terminal receipt must never be
+    # promoted to independent evidence of a prior effect.
+    if data["retry_authorized"]:
+        raise EffectError("stored receipt authorizes an unsafe retry")
+    if data["status"] == "EXECUTION_COMPLETE":
+        if (
+            not data["executed"]
+            or data["verdict"] not in ("eligible", "rejected", "unknown")
+            or data["effect_digest"] != sha256_digest(canonical_json(data["details"]))
+        ):
+            raise EffectError("completed receipt has inconsistent effect evidence")
+    elif data["status"] == "EXECUTION_FAILED":
+        if (
+            data["executed"]
+            or data["verdict"] != "unknown"
+            or data["effect_digest"] != "sha256:none"
+        ):
+            raise EffectError("failed receipt has inconsistent effect evidence")
+    else:
+        raise EffectError("receipt status is not a durable terminal outcome")
+    try:
+        return EffectReceipt(**data)
+    except TypeError as exc:
+        raise EffectError("receipt fields do not match schema") from exc
+
+
 class ClaimStore(Protocol):
     """Protocol for claim and receipt storage, implemented by synthetic and real stores."""
 
@@ -125,7 +194,10 @@ class ClaimStore(Protocol):
     def create_claim(self, request_id: str, request_sha: str) -> None:
         ...
 
-    def persist_receipt(self, receipt: EffectReceipt) -> None:
+    def create_bound_claim(self, request: EffectRequest, runner_sha: str) -> str:
+        ...
+
+    def persist_receipt(self, receipt: EffectReceipt, expected_claim_sha: str) -> None:
         ...
 
 
@@ -141,6 +213,8 @@ class SyntheticClaimStore:
         self.receipts: dict[str, EffectReceipt] = {}
         self.injected_post_status: int | None = None
         self.injected_post_persisted: bool = False
+        self._lock = threading.RLock()
+        self.bindings: dict[str, str] = {}
 
     def read_receipt(self, request_id: str) -> EffectReceipt | None:
         return self.receipts.get(request_id)
@@ -149,6 +223,10 @@ class SyntheticClaimStore:
         return self.claims.get(request_id)
 
     def create_claim(self, request_id: str, request_sha: str) -> None:
+        with self._lock:
+            self._create_claim(request_id, request_sha)
+
+    def _create_claim(self, request_id: str, request_sha: str) -> None:
         if self.injected_post_status == 401 or self.injected_post_status == 403:
             raise AuthorizationDeniedError(f"HTTP {self.injected_post_status}: Access denied")
 
@@ -163,8 +241,22 @@ class SyntheticClaimStore:
 
         self.claims[request_id] = request_sha
 
-    def persist_receipt(self, receipt: EffectReceipt) -> None:
-        self.receipts[receipt.request_id] = receipt
+    def create_bound_claim(self, request: EffectRequest, runner_sha: str) -> str:
+        with self._lock:
+            self.create_claim(request.request_id, runner_sha)
+            self.bindings[request.request_id] = request.content_digest
+        return runner_sha
+
+    def persist_receipt(self, receipt: EffectReceipt, expected_claim_sha: str) -> None:
+        validate_receipt(receipt.as_dict(), receipt.request_id)
+        with self._lock:
+            if self.claims.get(receipt.request_id) != expected_claim_sha:
+                raise EffectError("claim changed before receipt")
+            if self.bindings.get(receipt.request_id) != receipt.request_digest:
+                raise EffectError("receipt does not match bound request")
+            if receipt.request_id in self.receipts:
+                raise ClaimConflictError("receipt already exists")
+            self.receipts[receipt.request_id] = receipt
 
 
 class GitHubRefClaimStore:
@@ -201,6 +293,11 @@ class GitHubRefClaimStore:
         self.opener = opener or urllib.request.urlopen
         self.claim_ref_prefix = claim_ref_prefix
         self.receipt_ref_prefix = receipt_ref_prefix
+        for prefix in (claim_ref_prefix, receipt_ref_prefix):
+            if not re.fullmatch(r"refs/heads/[a-z0-9-]+/", prefix):
+                raise EffectError("invalid control ref prefix")
+        if claim_ref_prefix == receipt_ref_prefix:
+            raise EffectError("claim and receipt namespaces must differ")
 
 
     def _http_request(
@@ -235,12 +332,16 @@ class GitHubRefClaimStore:
             raise AmbiguousClaimError(f"network error: {exc.reason}") from exc
 
     def read_claim(self, request_id: str) -> str | None:
-        path = f"/repos/{self.owner}/{self.repo}/git/ref/heads/claims/{request_id}"
+        if not _REQUEST_ID_RE.fullmatch(request_id):
+            raise EffectError("invalid request_id")
+        path = f"/repos/{self.owner}/{self.repo}/git/ref/{self.claim_ref_prefix.removeprefix('refs/')}{request_id}"
         status, data = self._http_request("GET", path)
         if status == 200:
             obj = data.get("object", {})
             sha = obj.get("sha")
-            if isinstance(sha, str) and _SHA_RE.fullmatch(sha):
+            if (data.get("ref") == self.claim_ref_prefix + request_id
+                    and obj.get("type") == "commit"
+                    and isinstance(sha, str) and _SHA_RE.fullmatch(sha)):
                 return sha
             raise EffectError("claim ref returned malformed identity")
         if status == 404:
@@ -277,7 +378,7 @@ class GitHubRefClaimStore:
         """Read immutable Git-backed receipt across processes; no memory cache."""
         if not _REQUEST_ID_RE.fullmatch(request_id):
             raise EffectError("invalid request_id")
-        path = f"/repos/{self.owner}/{self.repo}/git/ref/heads/receipts/{request_id}"
+        path = f"/repos/{self.owner}/{self.repo}/git/ref/{self.receipt_ref_prefix.removeprefix('refs/')}{request_id}"
         status, found = self._http_request("GET", path)
         if status == 404:
             return None
@@ -286,7 +387,9 @@ class GitHubRefClaimStore:
         if status != 200:
             raise AmbiguousClaimError(f"HTTP {status}: Unable to establish receipt state")
         commit_sha = found.get("object", {}).get("sha")
-        if not isinstance(commit_sha, str) or not _SHA_RE.fullmatch(commit_sha):
+        if (found.get("ref") != self.receipt_ref_prefix + request_id
+                or found.get("object", {}).get("type") != "commit"
+                or not isinstance(commit_sha, str) or not _SHA_RE.fullmatch(commit_sha)):
             raise EffectError("receipt ref has invalid commit identity")
 
         # A receipt ref alone is not accepted evidence: the referenced commit
@@ -335,48 +438,78 @@ class GitHubRefClaimStore:
             raise EffectError("receipt body is malformed") from exc
         if not isinstance(data, dict):
             raise EffectError("receipt body must be a JSON object")
-        if data.get("schema") != "agent-dispatch.idempotent-effect-receipt.v1":
-            raise EffectError("receipt schema mismatch")
-        if data.get("request_id") != request_id:
-            raise EffectError("receipt identity does not match requested id")
-        if not isinstance(data.get("executed"), bool) or not isinstance(data.get("retry_authorized"), bool):
-            raise EffectError("receipt boolean fields are malformed")
-        for key in ("request_digest", "status", "verdict", "effect_digest"):
-            if not isinstance(data.get(key), str):
-                raise EffectError(f"receipt field {key} missing or malformed")
-        if not isinstance(data.get("details"), dict):
-            raise EffectError("receipt details must be an object")
-        if not isinstance(data["request_digest"], str) or not re.fullmatch(
-            r"sha256:[0-9a-f]{64}", data["request_digest"]
-        ):
-            raise EffectError("receipt request digest is invalid")
-        # Only terminal execution evidence is durably persisted. A fabricated
-        # ALREADY_RECEIPTED or inconsistent terminal receipt must never be
-        # promoted to independent evidence of a prior effect.
-        if data["retry_authorized"]:
-            raise EffectError("stored receipt authorizes an unsafe retry")
-        if data["status"] == "EXECUTION_COMPLETE":
-            if (
-                not data["executed"]
-                or data["verdict"] not in ("eligible", "rejected", "unknown")
-                or data["effect_digest"] != sha256_digest(canonical_json(data["details"]))
-            ):
-                raise EffectError("completed receipt has inconsistent effect evidence")
-        elif data["status"] == "EXECUTION_FAILED":
-            if (
-                data["executed"]
-                or data["verdict"] != "unknown"
-                or data["effect_digest"] != "sha256:none"
-            ):
-                raise EffectError("failed receipt has inconsistent effect evidence")
-        else:
-            raise EffectError("receipt status is not a durable terminal outcome")
-        try:
-            return EffectReceipt(**data)
-        except TypeError as exc:
-            raise EffectError("receipt fields do not match schema") from exc
+        receipt = validate_receipt(data, request_id)
+        if self._read_bound_digest(request_id, claim_sha) != receipt.request_digest:
+            raise EffectError("receipt does not match bound request")
+        return receipt
 
-    def persist_receipt(self, receipt: EffectReceipt) -> None:
+    def _read_bound_digest(self, request_id: str, claim_sha: str) -> str:
+        status, payload = self._http_request(
+            "GET", f"/repos/{self.owner}/{self.repo}/contents/request.json?ref={claim_sha}")
+        if status != 200:
+            raise EffectError("bound request unavailable; legacy claims require reconciliation")
+        try:
+            if payload.get("type") != "file" or payload.get("encoding") != "base64":
+                raise ValueError("invalid file")
+            data = json.loads(base64.b64decode("".join(payload["content"].split()), validate=True))
+            if set(data) != {"schema", "request", "request_digest", "runner_sha"}:
+                raise ValueError("invalid binding")
+            request = EffectRequest(**data["request"])
+            if (data["schema"] != "wow.idempotent-effect-claim.v1"
+                    or request.request_id != request_id
+                    or not isinstance(data["runner_sha"], str)
+                    or not _SHA_RE.fullmatch(data["runner_sha"])
+                    or request.content_digest != data["request_digest"]):
+                raise ValueError("invalid binding")
+            status, commit = self._http_request("GET",
+                f"/repos/{self.owner}/{self.repo}/git/commits/{claim_sha}")
+            if (status != 200 or commit.get("sha") != claim_sha
+                    or commit.get("parents") != [{"sha": data["runner_sha"]}]):
+                # GitHub parent objects include URLs: compare only exact SHA list.
+                parents = commit.get("parents", [])
+                if (status != 200 or commit.get("sha") != claim_sha
+                        or not isinstance(parents, list) or len(parents) != 1
+                        or not isinstance(parents[0], dict)
+                        or parents[0].get("sha") != data["runner_sha"]):
+                    raise ValueError("claim runner ancestry mismatch")
+            return request.content_digest
+        except (ValueError, TypeError, KeyError) as exc:
+            raise EffectError("invalid bound request") from exc
+
+    def _document_commit(self, filename: str, document: dict[str, Any], parent: str) -> str:
+        base = f"/repos/{self.owner}/{self.repo}"
+        status, blob = self._http_request("POST", f"{base}/git/blobs",
+                                         {"content": canonical_json(document).decode(), "encoding": "utf-8"})
+        blob_sha = self._created_sha(status, blob)
+        status, tree = self._http_request("POST", f"{base}/git/trees",
+            {"tree": [{"path": filename, "mode": "100644", "type": "blob", "sha": blob_sha}]})
+        tree_sha = self._created_sha(status, tree)
+        status, commit = self._http_request("POST", f"{base}/git/commits",
+            {"message": f"record {filename}", "tree": tree_sha, "parents": [parent]})
+        return self._created_sha(status, commit)
+
+    @staticmethod
+    def _created_sha(status: int, body: dict[str, Any]) -> str:
+        if status not in (200, 201):
+            raise AmbiguousClaimError(f"HTTP {status}: Git object write unconfirmed")
+        sha = body.get("sha")
+        if not isinstance(sha, str) or not _SHA_RE.fullmatch(sha):
+            raise EffectError("Git object identity missing")
+        return sha
+
+    def create_bound_claim(self, request: EffectRequest, runner_sha: str) -> str:
+        claim_sha = self._document_commit("request.json", {
+            "schema": "wow.idempotent-effect-claim.v1", "request": request.as_dict(),
+            "request_digest": request.content_digest, "runner_sha": runner_sha}, runner_sha)
+        self.create_claim(request.request_id, claim_sha)
+        # A create response is insufficient if ref identity/readback differs.
+        if self.read_claim(request.request_id) != claim_sha:
+            raise EffectError("claim readback differs from acquired identity")
+        if self._read_bound_digest(request.request_id, claim_sha) != request.content_digest:
+            raise EffectError("claim request binding mismatch")
+        return claim_sha
+
+    def persist_receipt(self, receipt: EffectReceipt, expected_claim_sha: str) -> None:
         """Write blob/tree/commit/create-once ref as existing Go ControlStore does.
 
         The ref's commit is parent-bound to the exact claim commit. The
@@ -384,6 +517,7 @@ class GitHubRefClaimStore:
         A partial/ambiguous API failure remains UNKNOWN and must not retry
         any consequential effect.
         """
+        validate_receipt(receipt.as_dict(), receipt.request_id)
         if not _REQUEST_ID_RE.fullmatch(receipt.request_id):
             raise EffectError("invalid receipt request_id")
         if receipt.schema != "agent-dispatch.idempotent-effect-receipt.v1":
@@ -391,41 +525,21 @@ class GitHubRefClaimStore:
         claim_sha = self.read_claim(receipt.request_id)
         if not claim_sha or not _SHA_RE.fullmatch(claim_sha):
             raise EffectError("cannot persist receipt without a durable claim")
+        if claim_sha != expected_claim_sha:
+            raise EffectError("claim changed before receipt")
+        if self._read_bound_digest(receipt.request_id, claim_sha) != receipt.request_digest:
+            raise EffectError("receipt does not match bound request")
         base = f"/repos/{self.owner}/{self.repo}"
-        raw = canonical_json(receipt.as_dict())
-        status, blob = self._http_request(
-            "POST", f"{base}/git/blobs",
-            {"content": raw.decode("utf-8"), "encoding": "utf-8"},
-        )
-        if status not in (200, 201):
-            raise AmbiguousClaimError(f"HTTP {status}: receipt blob not confirmed")
-        blob_sha = blob.get("sha")
-        if not isinstance(blob_sha, str) or not _SHA_RE.fullmatch(blob_sha):
-            raise EffectError("receipt blob identity missing")
-        status, tree = self._http_request(
-            "POST", f"{base}/git/trees",
-            {"tree": [{"path": "receipt.json", "mode": "100644", "type": "blob", "sha": blob_sha}]},
-        )
-        if status not in (200, 201):
-            raise AmbiguousClaimError(f"HTTP {status}: receipt tree not confirmed")
-        tree_sha = tree.get("sha")
-        if not isinstance(tree_sha, str) or not _SHA_RE.fullmatch(tree_sha):
-            raise EffectError("receipt tree identity missing")
-        status, commit = self._http_request(
-            "POST", f"{base}/git/commits",
-            {"message": f"record idempotent effect receipt {receipt.request_id}",
-             "tree": tree_sha, "parents": [claim_sha]},
-        )
-        if status not in (200, 201):
-            raise AmbiguousClaimError(f"HTTP {status}: receipt commit not confirmed")
-        commit_sha = commit.get("sha")
-        if not isinstance(commit_sha, str) or not _SHA_RE.fullmatch(commit_sha):
-            raise EffectError("receipt commit identity missing")
+        commit_sha = self._document_commit("receipt.json", receipt.as_dict(), expected_claim_sha)
+        if self.read_claim(receipt.request_id) != expected_claim_sha:
+            raise EffectError("claim changed before receipt publication")
         status, _ = self._http_request(
             "POST", f"{base}/git/refs",
             {"ref": f"{self.receipt_ref_prefix}{receipt.request_id}", "sha": commit_sha},
         )
         if status == 201:
+            if self.read_receipt(receipt.request_id) != receipt:
+                raise EffectError("receipt readback differs from published evidence")
             return
         if status == 422:
             raise ClaimConflictError("receipt ref already exists")
@@ -458,7 +572,7 @@ class IdempotentEffectExecutor:
         if self.authority_validator is None:
             return False
         if callable(self.authority_validator):
-            return bool(self.authority_validator(authority_revision))
+            return self.authority_validator(authority_revision) is True
         if isinstance(self.authority_validator, str):
             return authority_revision == self.authority_validator
         if isinstance(self.authority_validator, (set, list, tuple)):
@@ -503,6 +617,7 @@ class IdempotentEffectExecutor:
         # Step 1: Check existing receipt (read-before-execute idempotency)
         existing_receipt = self.store.read_receipt(request.request_id)
         if existing_receipt is not None:
+            validate_receipt(existing_receipt.as_dict(), request.request_id)
             if existing_receipt.request_digest != request.content_digest:
                 return EffectReceipt(
                     schema="agent-dispatch.idempotent-effect-receipt.v1",
@@ -536,7 +651,7 @@ class IdempotentEffectExecutor:
                 request_id=request.request_id,
                 request_digest=request.content_digest,
                 status="CLAIM_REJECTED",
-                verdict="rejected",
+                verdict="unknown",
                 effect_digest="sha256:none",
                 executed=False,
                 retry_authorized=False,
@@ -545,14 +660,14 @@ class IdempotentEffectExecutor:
 
         # Step 3: Acquire CAS create-once claim
         try:
-            self.store.create_claim(request.request_id, runner_sha)
+            claim_sha = self.store.create_bound_claim(request, runner_sha)
         except ClaimConflictError as exc:
             return EffectReceipt(
                 schema="agent-dispatch.idempotent-effect-receipt.v1",
                 request_id=request.request_id,
                 request_digest=request.content_digest,
                 status="CLAIM_REJECTED",
-                verdict="rejected",
+                verdict="unknown",
                 effect_digest="sha256:none",
                 executed=False,
                 retry_authorized=False,
@@ -606,7 +721,7 @@ class IdempotentEffectExecutor:
                 retry_authorized=False,
                 details={"phase": "handler_execution", "error": f"{type(exc).__name__}: {exc}"},
             )
-            self.store.persist_receipt(receipt)
+            self.store.persist_receipt(receipt, claim_sha)
             return receipt
 
         # Simulated crash after effect before receipt
@@ -626,5 +741,5 @@ class IdempotentEffectExecutor:
             details=result_details,
         )
         # Step 5: Persist immutable receipt
-        self.store.persist_receipt(receipt)
+        self.store.persist_receipt(receipt, claim_sha)
         return receipt

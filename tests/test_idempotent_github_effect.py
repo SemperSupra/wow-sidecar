@@ -125,7 +125,7 @@ class TestIdempotentGitHubEffect(unittest.TestCase):
         # Recovery run by normal executor: detects unreceipted claim and fails closed
         recovery_receipt = self.executor.process(self.request, self.runner_sha)
         self.assertEqual(recovery_receipt.status, "CLAIM_REJECTED")
-        self.assertEqual(recovery_receipt.verdict, "rejected")
+        self.assertEqual(recovery_receipt.verdict, "unknown")
         self.assertFalse(recovery_receipt.executed)
         self.assertFalse(recovery_receipt.retry_authorized)
         # Handler was still NEVER called
@@ -150,7 +150,7 @@ class TestIdempotentGitHubEffect(unittest.TestCase):
         # Recovery attempt detects existing unreceipted claim: must NOT re-execute effect
         recovery_receipt = self.executor.process(self.request, self.runner_sha)
         self.assertEqual(recovery_receipt.status, "CLAIM_REJECTED")
-        self.assertEqual(recovery_receipt.verdict, "rejected")
+        self.assertEqual(recovery_receipt.verdict, "unknown")
         self.assertFalse(recovery_receipt.executed)
         # Handler call count is strictly 1 (never called a second time)
         self.assertEqual(self.handler.call_count, 1)

@@ -17,6 +17,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from wow_sidecar.idempotent_github_effect import (
     EffectError,
+    CrashInjectionError,
     EffectRequest,
     GitHubRefClaimStore,
     IdempotentEffectExecutor,
@@ -54,7 +55,7 @@ class _GitDataHarness:
                 "parents": [{"sha": record["parent"]}],
                 "tree": {"sha": record["tree"]},
             }
-        if method == "GET" and route.startswith(root + "/contents/receipt.json"):
+        if method == "GET" and route.startswith(root + "/contents/"):
             qs = parse_qs(urlsplit(route).query)
             commit_sha = qs.get("ref", [""])[0]
             with self.lock:
@@ -77,7 +78,7 @@ class _GitDataHarness:
             return 201, {"sha": sha}
         if route == root + "/git/trees":
             entry = data["tree"][0]
-            if entry["path"] != "receipt.json" or entry["sha"] not in self.blobs:
+            if entry["path"] not in ("receipt.json", "request.json") or entry["sha"] not in self.blobs:
                 return 422, {}
             sha = hashlib.sha1(canonical_json(data)).hexdigest()
             with self.lock:
@@ -174,8 +175,10 @@ class TestDurableGitHubEffectReceipts(unittest.TestCase):
     def test_claim_bound_receipt_commit_parent(self):
         self.executor(self.store()).process(self.request, self.runner_sha)
         ref_sha = self.data.refs["refs/heads/receipts/" + self.request.request_id]
-        self.assertEqual(self.data.commits[ref_sha]["parent"], self.runner_sha)
-        self.assertIn(("refs/heads/claims/" + self.request.request_id, self.runner_sha), self.data.events)
+        claim_sha = self.data.refs[self.request.claim_ref]
+        self.assertEqual(self.data.commits[ref_sha]["parent"], claim_sha)
+        self.assertEqual(self.data.commits[claim_sha]["parent"], self.runner_sha)
+        self.assertIn((self.request.claim_ref, claim_sha), self.data.events)
 
     def test_same_id_different_payload_cannot_reuse_accepted_receipt(self):
         self.executor(self.store()).process(self.request, self.runner_sha)
@@ -293,7 +296,7 @@ print(json.dumps(result.as_dict(), sort_keys=True))
         self.assertEqual(first["status"], "EXECUTION_COMPLETE")
         self.assertIn("HANDLER_FIRED", first_err)
         ref = self.data.refs["refs/heads/receipts/" + self.request.request_id]
-        self.assertEqual(self.data.commits[ref]["parent"], self.runner_sha)
+        self.assertEqual(self.data.commits[ref]["parent"], self.data.refs[self.request.claim_ref])
 
         second, second_err = fresh_run()
         self.assertEqual(second["status"], "ALREADY_RECEIPTED")
@@ -317,6 +320,98 @@ print(json.dumps(result.as_dict(), sort_keys=True))
             with self.assertRaises(EffectError):
                 exe.process(self.request, self.runner_sha)
         self.assertEqual(self.data.events, [])
+
+    def test_payload_snapshot_preserves_nested_identity(self):
+        payload = {"target": {"name": "alpha"}}
+        request = EffectRequest("snapshot-001", "synthetic", "rev", "profile", payload)
+        digest = request.content_digest
+        payload["target"]["name"] = "beta"
+        request.payload["target"]["name"] = "gamma"
+        self.assertEqual(request.payload, {"target": {"name": "alpha"}})
+        self.assertEqual(request.content_digest, digest)
+
+    def test_handler_payload_view_cannot_change_receipted_identity(self):
+        digest = self.request.content_digest
+        def handler(request):
+            request.payload["sequence"] = 2
+            return "eligible", {"sequence": request.payload["sequence"]}
+        receipt = IdempotentEffectExecutor(self.store(), handler,
+            authority_validator=lambda _: True).process(self.request, self.runner_sha)
+        self.assertEqual(receipt.request_digest, digest)
+        self.assertEqual(receipt.details["sequence"], 1)
+        self.assertEqual(self.store().read_receipt(self.request.request_id).request_digest, digest)
+
+    def test_authority_callback_requires_literal_true(self):
+        for value in (1, "denied", {"eligible": False}, [True], None):
+            result = self.executor(self.store(), lambda _, v=value: v).process(self.request, self.runner_sha)
+            self.assertEqual(result.status, "AUTHORITY_REJECTED")
+        self.assertEqual(self.data.events, [])
+        self.assertEqual(self.calls, [])
+
+    def test_claim_change_during_handler_does_not_publish_receipt(self):
+        def handler(request):
+            self.data.refs[request.claim_ref] = "c" * 40
+            return "eligible", {"observed": True}
+        executor = IdempotentEffectExecutor(self.store(), handler, authority_validator=lambda _: True)
+        with self.assertRaisesRegex(EffectError, "claim changed"):
+            executor.process(self.request, self.runner_sha)
+        self.assertNotIn(self.request.receipt_ref, self.data.refs)
+
+    def test_crash_keeps_durable_request_binding_without_replay(self):
+        executor = self.executor(self.store())
+        executor.injected_crash = "crash_after_claim"
+        with self.assertRaises(CrashInjectionError):
+            executor.process(self.request, self.runner_sha)
+        claim_sha = self.store().read_claim(self.request.request_id)
+        self.assertEqual(self.store()._read_bound_digest(self.request.request_id, claim_sha), self.request.content_digest)
+        result = self.executor(self.store()).process(self.request, self.runner_sha)
+        self.assertEqual(result.verdict, "unknown")
+        self.assertFalse(result.retry_authorized)
+        self.assertEqual(self.calls, [])
+
+    def test_custom_namespaces_roundtrip(self):
+        def store():
+            return GitHubRefClaimStore("test-org/test-repo", "synthetic-only", self.api_base,
+                claim_ref_prefix="refs/heads/test-claims/", receipt_ref_prefix="refs/heads/test-receipts/")
+        self.executor(store()).process(self.request, self.runner_sha)
+        result = self.executor(store()).process(self.request, self.runner_sha)
+        self.assertEqual(result.status, "ALREADY_RECEIPTED")
+        self.assertEqual(len(self.calls), 1)
+
+    def test_receipt_digest_must_match_claim_document(self):
+        self.executor(self.store()).process(self.request, self.runner_sha)
+        self._corrupt_receipt_body({"request_digest": "sha256:" + "0" * 64})
+        with self.assertRaisesRegex(EffectError, "bound request"):
+            self.executor(self.store()).process(self.request, self.runner_sha)
+        self.assertEqual(len(self.calls), 1)
+
+    def test_invalid_handler_result_cannot_publish_completion(self):
+        executor = IdempotentEffectExecutor(self.store(), lambda _: ("invalid", []),
+                                            authority_validator=lambda _: True)
+        with self.assertRaises(EffectError):
+            executor.process(self.request, self.runner_sha)
+        self.assertNotIn(self.request.receipt_ref, self.data.refs)
+        self.assertIn(self.request.claim_ref, self.data.refs)
+
+    def test_success_response_without_receipt_persistence_is_unknown(self):
+        original = self.data.handle
+        def handle(method, route, data):
+            if method == "POST" and route.endswith("/git/refs") and data["ref"] == self.request.receipt_ref:
+                return 201, {"ref": data["ref"], "object": {"sha": data["sha"]}}
+            return original(method, route, data)
+        self.data.handle = handle
+        with self.assertRaisesRegex(EffectError, "readback"):
+            self.executor(self.store()).process(self.request, self.runner_sha)
+        result = self.executor(self.store()).process(self.request, self.runner_sha)
+        self.assertEqual(result.verdict, "unknown")
+        self.assertEqual(len(self.calls), 1)
+
+    def test_claim_runner_ancestry_must_match_binding(self):
+        self.executor(self.store()).process(self.request, self.runner_sha)
+        self.data.commits[self.data.refs[self.request.claim_ref]]["parent"] = "c" * 40
+        with self.assertRaisesRegex(EffectError, "bound request"):
+            self.executor(self.store()).process(self.request, self.runner_sha)
+        self.assertEqual(len(self.calls), 1)
 
 
 if __name__ == "__main__":
