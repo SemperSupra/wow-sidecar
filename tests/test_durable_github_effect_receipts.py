@@ -17,6 +17,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from wow_sidecar.idempotent_github_effect import (
     EffectError,
+    AmbiguousClaimError,
     CrashInjectionError,
     EffectRequest,
     GitHubRefClaimStore,
@@ -411,6 +412,35 @@ print(json.dumps(result.as_dict(), sort_keys=True))
         self.data.commits[self.data.refs[self.request.claim_ref]]["parent"] = "c" * 40
         with self.assertRaisesRegex(EffectError, "bound request"):
             self.executor(self.store()).process(self.request, self.runner_sha)
+        self.assertEqual(len(self.calls), 1)
+
+    def test_receipt_lost_ack_recovers_without_repeating_handler(self):
+        original = self.data.handle
+        def handle(method, route, data):
+            result = original(method, route, data)
+            if method == "POST" and route.endswith("/git/refs") and data["ref"] == self.request.receipt_ref:
+                return 504, {"message": "acknowledgment lost after persistence"}
+            return result
+        self.data.handle = handle
+        with self.assertRaises(AmbiguousClaimError):
+            self.executor(self.store()).process(self.request, self.runner_sha)
+        self.assertIn(self.request.receipt_ref, self.data.refs)
+        result = self.executor(self.store()).process(self.request, self.runner_sha)
+        self.assertEqual(result.status, "ALREADY_RECEIPTED")
+        self.assertFalse(result.executed)
+        self.assertFalse(result.retry_authorized)
+        self.assertEqual(len(self.calls), 1)
+
+    def test_crash_after_handler_retains_unknown_without_receipt_or_replay(self):
+        executor = self.executor(self.store())
+        executor.injected_crash = "crash_after_effect"
+        with self.assertRaises(CrashInjectionError):
+            executor.process(self.request, self.runner_sha)
+        self.assertNotIn(self.request.receipt_ref, self.data.refs)
+        result = self.executor(self.store()).process(self.request, self.runner_sha)
+        self.assertEqual(result.status, "CLAIM_REJECTED")
+        self.assertEqual(result.verdict, "unknown")
+        self.assertFalse(result.retry_authorized)
         self.assertEqual(len(self.calls), 1)
 
 
