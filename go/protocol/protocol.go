@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"regexp"
 	"sort"
@@ -16,9 +17,9 @@ type canonicalInteger string
 type canonicalFloat float64
 
 const (
-	RequestSchema = "agent-dispatch.host-operator-request.v1"
-	ReceiptSchema = "agent-dispatch.host-operator-receipt.v1"
-	ProfileSchema = "wow-sidecar.operator-profile.v1"
+	RequestSchema  = "agent-dispatch.host-operator-request.v1"
+	ReceiptSchema  = "agent-dispatch.host-operator-receipt.v1"
+	ProfileSchema  = "wow-sidecar.operator-profile.v1"
 	ClaimRefPrefix = "refs/heads/claims/"
 )
 
@@ -111,6 +112,9 @@ type PreExecutionDecision struct {
 }
 
 func exactObject(data []byte, expected ...string) (map[string]json.RawMessage, error) {
+	if err := rejectDuplicateJSONKeys(data); err != nil {
+		return nil, err
+	}
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("object decode failed: %w", err)
@@ -127,6 +131,79 @@ func exactObject(data []byte, expected ...string) (map[string]json.RawMessage, e
 		}
 	}
 	return raw, nil
+}
+
+// rejectDuplicateJSONKeys checks every object before encoding/json can apply its
+// usual last-key-wins behavior. Decoder.Token returns decoded keys, so escaped
+// spellings of the same key are treated as duplicates too.
+func rejectDuplicateJSONKeys(data []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	if err := scanJSONValue(decoder); err != nil {
+		return fmt.Errorf("JSON validation failed: %w", err)
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("JSON validation failed: trailing data")
+		}
+		return fmt.Errorf("JSON validation failed: %w", err)
+	}
+	return nil
+}
+
+func scanJSONValue(decoder *json.Decoder) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delim, isDelim := token.(json.Delim)
+	if !isDelim {
+		return nil
+	}
+	switch delim {
+	case '{':
+		seen := make(map[string]struct{})
+		for decoder.More() {
+			keyToken, err := decoder.Token()
+			if err != nil {
+				return err
+			}
+			key, ok := keyToken.(string)
+			if !ok {
+				return fmt.Errorf("object key is not a string")
+			}
+			if _, exists := seen[key]; exists {
+				return fmt.Errorf("duplicate JSON object key %q", key)
+			}
+			seen[key] = struct{}{}
+			if err := scanJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		closing, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		if closing != json.Delim('}') {
+			return fmt.Errorf("object is not properly closed")
+		}
+	case '[':
+		for decoder.More() {
+			if err := scanJSONValue(decoder); err != nil {
+				return err
+			}
+		}
+		closing, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		if closing != json.Delim(']') {
+			return fmt.Errorf("array is not properly closed")
+		}
+	default:
+		return fmt.Errorf("unexpected JSON delimiter %q", delim)
+	}
+	return nil
 }
 
 func normalizedNonEmpty(value, name string) error {
