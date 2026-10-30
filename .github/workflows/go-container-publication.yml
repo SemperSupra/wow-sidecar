@@ -18,6 +18,11 @@ on:
         description: Stable SemVer without v (for example 0.0.1); blank publishes the commit-addressed dev image
         required: false
         type: string
+      qualify_only:
+        description: Run qualification only; skip image publication
+        required: false
+        default: false
+        type: boolean
       confirm:
         description: Type publish-go-multiarch-exact for dev or publish-go-multiarch-v0.0.1-exact for v0.0.1
         required: true
@@ -269,7 +274,7 @@ jobs:
           archive: false
 
   publish:
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && !inputs.qualify_only
     needs: qualify
     permissions:
       contents: read
