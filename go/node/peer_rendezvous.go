@@ -12,6 +12,7 @@ import (
 	"github.com/SemperSupra/wow-sidecar/go/capability"
 	"github.com/SemperSupra/wow-sidecar/go/embodiment"
 	"github.com/SemperSupra/wow-sidecar/go/federation"
+	"github.com/SemperSupra/wow-sidecar/go/wirejson"
 )
 
 const maxPeerRendezvousRequestBytes = 16 * 1024
@@ -23,13 +24,13 @@ type CurrentDestinationLookup func() (embodiment.Card, bool)
 type PeerRendezvousHandlerConfig struct {
 	CurrentDestination CurrentDestinationLookup
 	CurrentPeer        CurrentPeerLookup
-	Credentials       *federation.PeerCredentials
-	VerifyAuthority   PeerAuthorityVerifier
-	Rendezvous        *RendezvousService
-	Replay            *federation.ReplayCache
-	Now               func() time.Time
-	MaxSkew           time.Duration
-	ReplayTTL         time.Duration
+	Credentials        *federation.PeerCredentials
+	VerifyAuthority    PeerAuthorityVerifier
+	Rendezvous         *RendezvousService
+	Replay             *federation.ReplayCache
+	Now                func() time.Time
+	MaxSkew            time.Duration
+	ReplayTTL          time.Duration
 }
 
 type peerRendezvousAuthority struct {
@@ -41,7 +42,7 @@ type peerRendezvousAuthority struct {
 type peerRendezvousRequest struct {
 	Envelope  federation.PeerEnvelope `json:"envelope"`
 	Authority peerRendezvousAuthority `json:"authority"`
-	Payload   json.RawMessage          `json:"payload"`
+	Payload   json.RawMessage         `json:"payload"`
 }
 
 type peerRendezvousResponse struct {
@@ -88,6 +89,9 @@ func NewPeerRendezvousHandler(config PeerRendezvousHandlerConfig) (*PeerRendezvo
 }
 
 func decodePeerRendezvousRequest(raw []byte) (peerRendezvousRequest, error) {
+	if err := wirejson.Validate[peerRendezvousRequest](raw); err != nil {
+		return peerRendezvousRequest{}, fmt.Errorf("validate peer rendezvous request: %w", err)
+	}
 	decoder := json.NewDecoder(strings.NewReader(string(raw)))
 	decoder.DisallowUnknownFields()
 	var request peerRendezvousRequest

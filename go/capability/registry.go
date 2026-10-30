@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/SemperSupra/wow-sidecar/go/wirejson"
 )
 
 const DescriptorSchema = "wow-sidecar.capability.v1"
@@ -59,11 +61,11 @@ type State struct {
 }
 
 type Request struct {
-	CapabilityID     string          `json:"capability_id"`
-	AuthorityRef     string          `json:"authority_ref,omitempty"`
-	AuthorityRevision string         `json:"authority_revision,omitempty"`
-	AuthorityState   string          `json:"authority_state,omitempty"`
-	Input            json.RawMessage `json:"input"`
+	CapabilityID      string          `json:"capability_id"`
+	AuthorityRef      string          `json:"authority_ref,omitempty"`
+	AuthorityRevision string          `json:"authority_revision,omitempty"`
+	AuthorityState    string          `json:"authority_state,omitempty"`
+	Input             json.RawMessage `json:"input"`
 }
 
 type Outcome struct {
@@ -85,7 +87,7 @@ type Registration struct {
 }
 
 type Registry struct {
-	mu           sync.RWMutex
+	mu            sync.RWMutex
 	registrations map[string]Registration
 }
 
@@ -160,6 +162,9 @@ func validateRequest(req Request, descriptor Descriptor) error {
 	}
 	if req.Input == nil {
 		req.Input = json.RawMessage(`{}`)
+	}
+	if err := wirejson.Validate[map[string]any](req.Input); err != nil {
+		return fmt.Errorf("capability input must be unambiguous JSON: %w", err)
 	}
 	var input any
 	if err := json.Unmarshal(req.Input, &input); err != nil {
@@ -243,9 +248,9 @@ func (r *Registry) Observe(ctx context.Context, capabilityID string) (State, err
 	if err != nil {
 		return State{
 			CapabilityID: capabilityID,
-			Readiness: ReadinessUnknown,
-			ObservedAt: time.Now().UTC(),
-			Reason: "probe-failed",
+			Readiness:    ReadinessUnknown,
+			ObservedAt:   time.Now().UTC(),
+			Reason:       "probe-failed",
 		}, nil
 	}
 	if err := state.Validate(capabilityID); err != nil {
@@ -277,22 +282,22 @@ func (r *Registry) Invoke(
 		}
 		if err := verify(ctx, req); err != nil {
 			return Outcome{
-				Result: "UNKNOWN",
-				Status: "authority-verification-failed",
+				Result:            "UNKNOWN",
+				Status:            "authority-verification-failed",
 				MutationPerformed: false,
-				RetryAuthorized: false,
-				Data: map[string]any{"preserve_evidence": true},
+				RetryAuthorized:   false,
+				Data:              map[string]any{"preserve_evidence": true},
 			}, nil
 		}
 	}
 	outcome, err := registration.Handler(ctx, req)
 	if err != nil {
 		return Outcome{
-			Result: "UNKNOWN",
-			Status: "capability-outcome-unknown",
+			Result:            "UNKNOWN",
+			Status:            "capability-outcome-unknown",
 			MutationPerformed: registration.Descriptor.Kind == KindActuator,
-			RetryAuthorized: false,
-			Data: map[string]any{"preserve_evidence": true},
+			RetryAuthorized:   false,
+			Data:              map[string]any{"preserve_evidence": true},
 		}, nil
 	}
 	if err := validateOutcome(registration.Descriptor, outcome); err != nil {
@@ -305,6 +310,9 @@ func DecodeStrictInput[T any](raw json.RawMessage) (T, error) {
 	var zero T
 	if raw == nil {
 		raw = json.RawMessage(`{}`)
+	}
+	if err := wirejson.Validate[T](raw); err != nil {
+		return zero, fmt.Errorf("validate capability input: %w", err)
 	}
 	decoder := json.NewDecoder(strings.NewReader(string(raw)))
 	decoder.DisallowUnknownFields()
