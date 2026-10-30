@@ -18,10 +18,10 @@ type conformanceVector struct {
 }
 
 type conformanceCorpus struct {
-	Schema          string `json:"schema"`
-	OracleRevision  string `json:"oracle_revision"`
-	RequestVectors  []conformanceVector `json:"request_vectors"`
-	ProfileVectors  []conformanceVector `json:"profile_vectors"`
+	Schema           string              `json:"schema"`
+	OracleRevision   string              `json:"oracle_revision"`
+	RequestVectors   []conformanceVector `json:"request_vectors"`
+	ProfileVectors   []conformanceVector `json:"profile_vectors"`
 	CanonicalVectors []struct {
 		ID            string         `json:"id"`
 		Value         map[string]any `json:"value"`
@@ -138,6 +138,40 @@ func marshalVector(t *testing.T, value map[string]any) []byte {
 	return raw
 }
 
+func TestRejectDuplicateJSONKeysRecursively(t *testing.T) {
+	tests := []struct {
+		name string
+		json string
+	}{
+		{name: "top-level", json: `{"request_id":"first","request_id":"second"}`},
+		{name: "escaped-equivalent", json: `{"request_id":"first","request\u005fid":"second"}`},
+		{name: "nested-object", json: `{"authority":{"record":"one","record":"two"}}`},
+		{name: "array-nested-object", json: `{"inputs":[{"x":1,"x":2}]}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := rejectDuplicateJSONKeys([]byte(test.json)); err == nil || !strings.Contains(err.Error(), "duplicate JSON object key") {
+				t.Fatalf("expected duplicate-key rejection, got %v", err)
+			}
+		})
+	}
+}
+
+func TestRequestAndProfileParsingRejectDuplicateFields(t *testing.T) {
+	corpus := loadCorpus(t)
+	request := string(marshalVector(t, corpus.RequestVectors[0].Value))
+	request = strings.TrimSuffix(request, "}") + `,"request_id":"other"}`
+	if _, err := ParseRequest([]byte(request)); err == nil || !strings.Contains(err.Error(), "duplicate JSON object key") {
+		t.Fatalf("request duplicate key was not rejected: %v", err)
+	}
+
+	profile := string(marshalVector(t, corpus.ProfileVectors[0].Value))
+	profile = strings.TrimSuffix(profile, "}") + `,"profile":"other"}`
+	if _, err := ParseProfile([]byte(profile)); err == nil || !strings.Contains(err.Error(), "duplicate JSON object key") {
+		t.Fatalf("profile duplicate key was not rejected: %v", err)
+	}
+}
+
 func TestRequestConformanceVectors(t *testing.T) {
 	corpus := loadCorpus(t)
 	index := vectorIndex(corpus.RequestVectors)
@@ -228,9 +262,9 @@ func TestAuthorityBindingAndPreExecutionState(t *testing.T) {
 		t.Fatalf("parse base request: %v", err)
 	}
 	if err := ValidateAuthorityBinding(req, AuthorityBinding{
-		Record: req.Authority.Record,
+		Record:   req.Authority.Record,
 		Revision: req.Authority.Revision,
-		State: "open",
+		State:    "open",
 	}); err != nil {
 		t.Fatalf("valid binding rejected: %v", err)
 	}
