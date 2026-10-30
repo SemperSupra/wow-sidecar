@@ -52,7 +52,9 @@ jobs:
       - name: Bind exact candidate
         id: identity
         env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
           RELEASE_VERSION: ${{ inputs.release_version }}
+          EVENT_NAME: ${{ github.event_name }}
         shell: bash
         run: |
           set -euo pipefail
@@ -60,6 +62,11 @@ jobs:
           test "${#sha}" -eq 40
           case "$sha" in (*[!0-9a-f]*|'') exit 2;; esac
           test -z "$(git status --porcelain)"
+          if [[ "$EVENT_NAME" == 'workflow_dispatch' ]]; then
+            test "${#EXPECTED_SHA}" -eq 40
+            case "$EXPECTED_SHA" in (*[!0-9a-f]*|'') exit 2;; esac
+            test "$sha" = "$EXPECTED_SHA"
+          fi
           if [[ -n "$RELEASE_VERSION" ]]; then
             if [[ ! "$RELEASE_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
               echo 'release_version must be canonical stable SemVer without a v prefix' >&2
@@ -262,7 +269,7 @@ jobs:
           archive: false
 
   publish:
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
     needs: qualify
     permissions:
       contents: read
