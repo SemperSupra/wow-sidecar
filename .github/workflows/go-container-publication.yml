@@ -14,13 +14,21 @@ on:
         description: Exact 40-hex main revision to publish
         required: true
         type: string
+      release_version:
+        description: Stable SemVer without v (for example 0.0.1); blank publishes the commit-addressed dev image
+        required: false
+        type: string
       confirm:
-        description: Type publish-go-multiarch-exact
+        description: Type publish-go-multiarch-exact for dev or publish-go-multiarch-v0.0.1-exact for v0.0.1
         required: true
         type: string
 
 permissions:
   contents: read
+
+concurrency:
+  group: wow-sidecar-go-publication-${{ github.event_name == 'workflow_dispatch' && (inputs.release_version || inputs.expected_sha) || github.ref }}
+  cancel-in-progress: false
 
 env:
   IMAGE: ghcr.io/sempersupra/wow-sidecar
@@ -43,6 +51,8 @@ jobs:
 
       - name: Bind exact candidate
         id: identity
+        env:
+          RELEASE_VERSION: ${{ inputs.release_version }}
         shell: bash
         run: |
           set -euo pipefail
@@ -50,8 +60,18 @@ jobs:
           test "${#sha}" -eq 40
           case "$sha" in (*[!0-9a-f]*|'') exit 2;; esac
           test -z "$(git status --porcelain)"
-          version="0.0.0-dev.${sha:0:12}"
-          printf 'sha=%s\nversion=%s\n' "$sha" "$version" >> "$GITHUB_OUTPUT"
+          if [[ -n "$RELEASE_VERSION" ]]; then
+            if [[ ! "$RELEASE_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+              echo 'release_version must be canonical stable SemVer without a v prefix' >&2
+              exit 2
+            fi
+            version="$RELEASE_VERSION"
+            tag="v$version"
+          else
+            version="0.0.0-dev.${sha:0:12}"
+            tag="go-source-$sha"
+          fi
+          printf 'sha=%s\nversion=%s\ntag=%s\n' "$sha" "$version" "$tag" >> "$GITHUB_OUTPUT"
 
       - name: Public-safety and dependency guard
         shell: bash
@@ -253,6 +273,7 @@ jobs:
       digest: ${{ steps.publish.outputs.digest }}
       tag: ${{ steps.publish.outputs.tag }}
       source_sha: ${{ steps.identity.outputs.sha }}
+      version: ${{ steps.identity.outputs.version }}
       amd64_digest: ${{ steps.publish.outputs.amd64_digest }}
       arm64_digest: ${{ steps.publish.outputs.arm64_digest }}
     steps:
@@ -264,19 +285,31 @@ jobs:
         id: identity
         env:
           EXPECTED_SHA: ${{ inputs.expected_sha }}
+          RELEASE_VERSION: ${{ inputs.release_version }}
           CONFIRM: ${{ inputs.confirm }}
         shell: bash
         run: |
           set -euo pipefail
           test "$GITHUB_REF" = 'refs/heads/main'
-          test "$CONFIRM" = 'publish-go-multiarch-exact'
           sha="$(git rev-parse HEAD)"
           test "${#EXPECTED_SHA}" -eq 40
           case "$EXPECTED_SHA" in (*[!0-9a-f]*|'') exit 2;; esac
           test "$sha" = "$EXPECTED_SHA"
           test -z "$(git status --porcelain)"
-          version="0.0.0-dev.${sha:0:12}"
-          tag="go-source-$sha"
+          if [[ -n "$RELEASE_VERSION" ]]; then
+            if [[ ! "$RELEASE_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+              echo 'release_version must be canonical stable SemVer without a v prefix' >&2
+              exit 2
+            fi
+            version="$RELEASE_VERSION"
+            tag="v$version"
+            expected_confirm="publish-go-multiarch-${tag}-exact"
+          else
+            version="0.0.0-dev.${sha:0:12}"
+            tag="go-source-$sha"
+            expected_confirm='publish-go-multiarch-exact'
+          fi
+          test "$CONFIRM" = "$expected_confirm"
           printf 'sha=%s\nversion=%s\ntag=%s\n' "$sha" "$version" "$tag" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
@@ -403,6 +436,7 @@ jobs:
         env:
           DIGEST: ${{ needs.publish.outputs.digest }}
           SOURCE_SHA: ${{ needs.publish.outputs.source_sha }}
+          BUILD_VERSION: ${{ needs.publish.outputs.version }}
         shell: bash
         run: |
           set -euo pipefail
@@ -415,6 +449,8 @@ jobs:
           test "$user" = '10001:10001'
           revision="$(docker image inspect "$ref" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')"
           test "$revision" = "$SOURCE_SHA"
+          version="$(docker image inspect "$ref" --format '{{index .Config.Labels "org.opencontainers.image.version"}}')"
+          test "$version" = "$BUILD_VERSION"
 
           set +e
           docker run --rm --entrypoint /bin/sh "$ref" -c true >/tmp/wow-shell.out 2>&1
