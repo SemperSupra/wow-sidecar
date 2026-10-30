@@ -20,6 +20,10 @@ type customDecoderWire struct {
 	State string `json:"state"`
 }
 
+type invalidTagWire struct {
+	State string `json:"bad\\name"`
+}
+
 func (c *customDecoderWire) UnmarshalJSON(data []byte) error {
 	type plain customDecoderWire
 	return json.Unmarshal(data, (*plain)(c))
@@ -90,6 +94,16 @@ func TestValidateRejectsCaseAmbiguousAndCustomDecoderSchemas(t *testing.T) {
 	}
 	if err := Validate[customDecoderWire]([]byte(`{"state":"ok"}`)); err == nil {
 		t.Fatal("custom JSON decoder schema accepted without an explicit validator")
+	}
+}
+
+func TestValidateMatchesEncodingJSONInvalidTagFallback(t *testing.T) {
+	var decoded invalidTagWire
+	if err := json.Unmarshal([]byte(`{"STATE":"ok"}`), &decoded); err != nil || decoded.State != "ok" {
+		t.Fatalf("test input no longer follows encoding/json field fallback: decoded=%+v err=%v", decoded, err)
+	}
+	if err := Validate[invalidTagWire]([]byte(`{"STATE":"ok"}`)); err == nil {
+		t.Fatal("case alias accepted for field whose invalid tag falls back to Go name")
 	}
 }
 

@@ -1,8 +1,15 @@
 package node
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"net/http"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/SemperSupra/wow-sidecar/go/rendezvous"
 )
 
 func TestPeerRendezvousRejectsAmbiguousAuthorityWireKeys(t *testing.T) {
@@ -25,6 +32,44 @@ func TestPeerRendezvousRejectsAmbiguousAuthorityWireKeys(t *testing.T) {
 				t.Fatal("ambiguous authority-bearing JSON was accepted")
 			}
 		})
+	}
+}
+
+func TestPeerRendezvousAmbiguousAuthorityDoesNotReachVerifierOrConsumeReplay(t *testing.T) {
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	authorityCalls := 0
+	handler, service, handoffID, key := newPeerHandlerForTest(t, now, func(_ context.Context, _, _, _ string) error {
+		authorityCalls++
+		return nil
+	})
+	payload := json.RawMessage(`{"operation":"claim","handoff_id":"` + handoffID + `","launch_id":"launch-ambiguous"}`)
+	valid := signedPeerWireRequest(t, now, key, "peerreq-ambig-01", "rendezvous.claim", payload)
+	ambiguous := bytes.Replace(valid, []byte(`"state":"open"`), []byte(`"state":"closed","state":"open"`), 1)
+	if bytes.Equal(ambiguous, valid) {
+		t.Fatal("test failed to inject duplicate authority state")
+	}
+	if response := servePeerRequest(handler, ambiguous); response.Code != http.StatusBadRequest {
+		t.Fatalf("ambiguous authority status=%d body=%q", response.Code, response.Body.String())
+	}
+	if authorityCalls != 0 {
+		t.Fatalf("authority verifier ran for rejected wire data: calls=%d", authorityCalls)
+	}
+	ctx := context.WithValue(context.Background(), rendezvousPrincipalContextKey{}, rendezvous.Principal{
+		ClientID: "durable-control",
+		Subject:  peerTestAuthorityRef + "@" + peerTestAuthorityRev,
+	})
+	state, err := service.store.Get(ctx, handoffID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Status != "offered" || state.Claim != nil {
+		t.Fatalf("ambiguous request changed durable rendezvous state: %+v", state)
+	}
+	if response := servePeerRequest(handler, valid); response.Code != http.StatusOK {
+		t.Fatalf("valid same-id request after malformed input status=%d body=%q", response.Code, response.Body.String())
+	}
+	if authorityCalls != 1 {
+		t.Fatalf("valid request did not reach authority exactly once: calls=%d", authorityCalls)
 	}
 }
 

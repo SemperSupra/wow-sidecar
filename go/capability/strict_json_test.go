@@ -33,3 +33,21 @@ func TestDecodeStrictInputPreservesDistinctCaseMapKeys(t *testing.T) {
 		t.Fatalf("case-distinct map keys changed: %#v", got)
 	}
 }
+
+func TestValidateRequestRejectsDuplicateDynamicInputKeys(t *testing.T) {
+	descriptor := sensorDescriptor("system.identity", DisclosurePublic)
+	duplicate := Request{
+		CapabilityID: descriptor.ID,
+		Input:        json.RawMessage(`{"nested":{"state":"closed","state":"open"}}`),
+	}
+	if err := validateRequest(duplicate, descriptor); err == nil {
+		t.Fatal("duplicate dynamic capability input keys accepted")
+	}
+	distinctCase := Request{
+		CapabilityID: descriptor.ID,
+		Input:        json.RawMessage(`{"State":"upper","state":"lower"}`),
+	}
+	if err := validateRequest(distinctCase, descriptor); err != nil {
+		t.Fatalf("case-distinct dynamic map keys rejected: %v", err)
+	}
+}

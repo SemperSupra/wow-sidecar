@@ -9,6 +9,7 @@ import (
 	"io"
 	"reflect"
 	"strings"
+	"unicode"
 )
 
 const (
@@ -139,9 +140,13 @@ func fieldsFor(typ reflect.Type) (map[string]reflect.Type, bool, error) {
 		if field.PkgPath != "" { // unexported
 			continue
 		}
-		name := strings.Split(field.Tag.Get("json"), ",")[0]
-		if name == "-" {
+		tag := field.Tag.Get("json")
+		if tag == "-" {
 			continue
+		}
+		name := strings.Split(tag, ",")[0]
+		if !validTagName(name) {
+			name = ""
 		}
 		if name == "" {
 			name = field.Name
@@ -157,4 +162,21 @@ func fieldsFor(typ reflect.Type) (map[string]reflect.Type, bool, error) {
 		fields[name] = field.Type
 	}
 	return fields, true, nil
+}
+
+// validTagName mirrors encoding/json's exported tag-name validity rules so
+// reflection resolves invalid tags to the Go field name just as its decoder
+// does. A mismatch here could otherwise let a case alias pass pre-validation.
+func validTagName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, r := range name {
+		switch {
+		case strings.ContainsRune("!#$%&()*+-./:;<=>?@[]^_{|}~ ", r):
+		case !unicode.IsLetter(r) && !unicode.IsDigit(r):
+			return false
+		}
+	}
+	return true
 }
