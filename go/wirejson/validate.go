@@ -55,6 +55,11 @@ func walkValue(dec *json.Decoder, typ reflect.Type, depth int) error {
 	}
 	switch delim, ok := tok.(json.Delim); {
 	case ok && delim == '{':
+		if typ != nil && typ.Kind() == reflect.Map {
+			if err := validateMapKeyType(typ.Key()); err != nil {
+				return err
+			}
+		}
 		fields, structType, err := fieldsFor(typ)
 		if err != nil {
 			return err
@@ -119,6 +124,14 @@ func walkValue(dec *json.Decoder, typ reflect.Type, depth int) error {
 		}
 	case ok:
 		return fmt.Errorf("unexpected JSON delimiter %q", delim)
+	}
+	return nil
+}
+
+func validateMapKeyType(key reflect.Type) error {
+	textUnmarshaler := reflect.TypeOf((*interface{ UnmarshalText([]byte) error })(nil)).Elem()
+	if key.Kind() != reflect.String || key.Implements(textUnmarshaler) || reflect.PointerTo(key).Implements(textUnmarshaler) {
+		return fmt.Errorf("JSON map key type %s may coerce distinct object keys", key)
 	}
 	return nil
 }

@@ -24,6 +24,13 @@ type invalidTagWire struct {
 	State string `json:"bad\\name"`
 }
 
+type normalizedMapKey string
+
+func (k *normalizedMapKey) UnmarshalText(text []byte) error {
+	*k = normalizedMapKey(strings.TrimLeft(string(text), "0"))
+	return nil
+}
+
 func (c *customDecoderWire) UnmarshalJSON(data []byte) error {
 	type plain customDecoderWire
 	return json.Unmarshal(data, (*plain)(c))
@@ -53,6 +60,16 @@ func TestValidateRejectsStructCaseAliasesButAllowsMapCaseDistinctions(t *testing
 	}
 	if err := Validate[map[string]string]([]byte(`{"State":"upper","state":"lower"}`)); err != nil {
 		t.Fatalf("distinct map keys rejected: %v", err)
+	}
+}
+
+func TestValidateRejectsMapKeysThatCanCoerceDistinctJSONNames(t *testing.T) {
+	if err := Validate[map[int]string]([]byte(`{"1":"first","01":"second"}`)); err == nil {
+		t.Fatal("integer map keys that coerce distinct JSON names were accepted")
+	}
+	type customMap map[normalizedMapKey]string
+	if err := Validate[customMap]([]byte(`{"1":"first","01":"second"}`)); err == nil {
+		t.Fatal("text-unmarshaled map keys that coerce distinct JSON names were accepted")
 	}
 }
 
