@@ -1,0 +1,66 @@
+name: WOW Sidecar peer fencing model qualification
+
+on:
+  pull_request:
+    paths:
+      - 'formal/**'
+      - '.github/workflows/go-peer-formal.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tlc:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Bind exact source and download SHA-locked upstream TLC
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD
+          test -z "$(git status --porcelain)"
+          curl --fail --location --silent --show-error --retry 3 \
+            --output "$RUNNER_TEMP/tla2tools.jar" \
+            https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar
+          printf '%s  %s\n' \
+            '011267fca25d0752cf18894dd585cd28b96960c112ea8a20b823ea770e7e10cd' \
+            "$RUNNER_TEMP/tla2tools.jar" | sha256sum --check -
+          java -version
+      - name: Parse and model-check peer-generation invariants
+        shell: bash
+        run: |
+          set -euo pipefail
+          java -cp "$RUNNER_TEMP/tla2tools.jar" tla2sany.SANY formal/PeerFence.tla
+          java -XX:+UseParallelGC -jar "$RUNNER_TEMP/tla2tools.jar" \
+            -workers 1 -config formal/PeerFence.cfg formal/PeerFence.tla \
+            | tee "$RUNNER_TEMP/peer-fence-tlc.log"
+          grep -Eq 'Model checking completed|Model checking completed. No error' "$RUNNER_TEMP/peer-fence-tlc.log"
+      - name: Red-team injected stale mutation must yield TLC counterexample
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          java -XX:+UseParallelGC -jar "$RUNNER_TEMP/tla2tools.jar" \
+            -workers 1 -config formal/PeerFenceUnsafe.cfg formal/PeerFenceUnsafe.tla \
+            > "$RUNNER_TEMP/peer-fence-unsafe-tlc.log" 2>&1
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo 'FAIL: unsafe model unexpectedly passed' >&2
+            cat "$RUNNER_TEMP/peer-fence-unsafe-tlc.log"
+            exit 1
+          fi
+          if ! grep -Eq 'Invariant StaleNeverMutates is violated' "$RUNNER_TEMP/peer-fence-unsafe-tlc.log"; then
+            echo 'FAIL: unsafe model failed for a reason other than the target invariant' >&2
+            cat "$RUNNER_TEMP/peer-fence-unsafe-tlc.log"
+            exit 1
+          fi
+          echo "EXPECTED_COUNTEREXAMPLE_PASS: invariant caught unsafe stale mutation"
+          grep -E 'Invariant StaleNeverMutates is violated|Error: Invariant' "$RUNNER_TEMP/peer-fence-unsafe-tlc.log"
+
