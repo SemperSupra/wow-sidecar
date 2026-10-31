@@ -59,11 +59,14 @@ invariant. A model-checked abstract TLA+ invariant is not implementation proof.
   releasing the lock before the consequential operation.
 - `CurrentDestination` is consulted before canonical authorization, then
   again under the guard; the second check must remain the decisive one.
-- The current HMAC doesn't bind the authority object. A verifier policy that
-  accepts multiple authority records must still enforce the exact operation
-  and local rendezvous binding; otherwise two different valid authorities may
-  authorize a single signed envelope. Consider a versioned signed-intent
-  schema rather than silently altering v1 interoperability.
+- The current HMAC doesn't bind the authority object. The **actual configured
+  control worker** at `go/node/control.go:201-217` first checks an exact
+  configured authority record/revision and `state == "open"`, then independently
+  re-reads canonical GitHub authority; these are meaningful present guards.
+  That guard alone does not make authority fields cryptographically signed.
+  A separate verifier implementation that accepts multiple authority records
+  may require additional exact operation and local rendezvous intent binding;
+  consider a versioned signed-intent schema rather than silently changing v1.
 - Any process that can rewrite the generation-state directory or lock file
   may subvert local fencing. Treat filesystem ownership and state durability
   as deployment preconditions.
