@@ -41,3 +41,26 @@ jobs:
             -workers 1 -config formal/PeerFence.cfg formal/PeerFence.tla \
             | tee "$RUNNER_TEMP/peer-fence-tlc.log"
           grep -Eq 'Model checking completed|Model checking completed. No error' "$RUNNER_TEMP/peer-fence-tlc.log"
+      - name: Red-team injected stale mutation must yield TLC counterexample
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          java -XX:+UseParallelGC -jar "$RUNNER_TEMP/tla2tools.jar" \
+            -workers 1 -config formal/PeerFenceUnsafe.cfg formal/PeerFenceUnsafe.tla \
+            > "$RUNNER_TEMP/peer-fence-unsafe-tlc.log" 2>&1
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo 'FAIL: unsafe model unexpectedly passed' >&2
+            cat "$RUNNER_TEMP/peer-fence-unsafe-tlc.log"
+            exit 1
+          fi
+          if ! grep -Eq 'Invariant StaleNeverMutates is violated' "$RUNNER_TEMP/peer-fence-unsafe-tlc.log"; then
+            echo 'FAIL: unsafe model failed for a reason other than the target invariant' >&2
+            cat "$RUNNER_TEMP/peer-fence-unsafe-tlc.log"
+            exit 1
+          fi
+          echo "EXPECTED_COUNTEREXAMPLE_PASS: invariant caught unsafe stale mutation"
+          grep -E 'Invariant StaleNeverMutates is violated|Error: Invariant' "$RUNNER_TEMP/peer-fence-unsafe-tlc.log"
+
