@@ -32,17 +32,33 @@ pinned binary is pre-staged.
 ```sh
 bash scripts/ci-preflight.sh --static
 bash scripts/ci-preflight.sh --act-list
+
+# Explicit, opt-in local Go conformance ONLY, on an already authorized
+# Docker-compatible Linux/WSL2 engine with no production credentials.
+export WOW_ACT_RUNNER_IMAGE='approved/runner@sha256:<64-lowercase-hex>'
+bash scripts/ci-preflight.sh --act-go
+
+# Pure mocked allowlist validation; does NOT invoke Act/Docker:
+bash scripts/test-ci-preflight.sh
 ```
 
 `--static` requires actionlint and fails closed if missing. ShellCheck/zizmor
 are supplemental and report SKIPPED when missing. `--act-list` enumerates
-only; it cannot execute any GitHub Actions job, call Docker, publish or deploy.
+only. `--act-go` is a **deliberate, opt-in local Docker operation** limited
+to the existing public `.github/workflows/go-conformance.yml` job
+`conformance`; it requires an approved digest-pinned runner image, strips
+common ambient GitHub token variables and passes an empty explicit secrets
+file. The command neither selects the release workflow nor authorizes
+publication or deployment. Other credentials, Docker socket privileges,
+Act configuration and local file visibility must still be assessed by the
+local operator before invocation.
 
-An actual `act` run must be separately admitted with an explicit workflow
-and non-production fixture: do not treat `act` as an interchangeable ARM64,
-`workflow_dispatch`, GHCR, privileged target or real `GITHUB_TOKEN` executor.
-Document unsupported runner labels and any divergent artifact/permission
-semantics. Prefer real **public-safe $0 hosted CI** for final qualification.
+The mocked preflight test is safe for public GHA and validates command
+selection and digest constraints without invoking Docker. A real Act run
+**has not been performed by this source-only workcell**. Act does not prove
+native ARM64, registry authority, GitHub artifact semantics or target HIL.
+Record the Act and runner-image versions/digests and any discrepancies;
+prefer **public-safe $0 hosted CI** as final qualification authority.
 
 ## 3. Evidence and dependencies
 
