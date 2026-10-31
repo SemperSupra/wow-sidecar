@@ -158,3 +158,49 @@ func sortedUnique(values []string) ([]string, error) {
 	}
 	return out, nil
 }
+
+// withCurrentGenerationLease holds a read lock on the same state lock used by
+// allocateGeneration for the entire admitted local callback. A new generation
+// cannot be allocated concurrently with that callback on the same local
+// filesystem. If this runtime has already been superseded, the callback is
+// never entered, so replay and rendezvous state remain untouched.
+//
+// This is an OS-local same-state-path fence, NOT distributed leader election,
+// cross-host state coherence or shutdown/drain qualification.
+func withCurrentGenerationLease(path, nodeID string, expected uint64, fn func() error) error {
+    if path == "" || nodeID == "" || expected == 0 || fn == nil {
+        return fmt.Errorf("generation guard requires valid identity and callback")
+    }
+    lock, err := os.OpenFile(path+".lock", os.O_RDWR|os.O_CREATE, 0o600)
+    if err != nil {
+        return fmt.Errorf("open generation guard lock: %w", err)
+    }
+    defer lock.Close()
+
+    // Fail closed during writer rotation instead of waiting on a contested
+    // generation lock. The shared lock must be held until fn returns.
+    if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); err != nil {
+        return fmt.Errorf("generation guard lock unavailable: %w", err)
+    }
+    defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+
+    raw, err := os.ReadFile(path)
+    if err != nil {
+        return fmt.Errorf("generation state unavailable: %w", err)
+    }
+    decoder := json.NewDecoder(bytesReader(raw))
+    decoder.DisallowUnknownFields()
+    var state generationState
+    if err := decoder.Decode(&state); err != nil {
+        return fmt.Errorf("invalid generation state: %w", err)
+    }
+    var trailing any
+    if err := decoder.Decode(&trailing); err != io.EOF {
+        return fmt.Errorf("generation state has trailing data")
+    }
+    if state.Schema != generationStateSchema ||
+        state.NodeID != nodeID || state.Generation != expected {
+        return fmt.Errorf("runtime generation superseded or inconsistent")
+    }
+    return fn()
+}
