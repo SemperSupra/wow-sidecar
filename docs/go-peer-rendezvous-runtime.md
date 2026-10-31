@@ -78,10 +78,15 @@ advances, fails observation, or expires during authority verification is
 rejected before replay or mutation.
 
 The runtime's destination generation and incarnation are initialized once per
-runtime instance, but this does not by itself establish *cross-process*
-exclusivity when an old instance overlaps a replacement generation. Prove
-shutdown/drain and replacement-process fencing (including an in-flight
-mutation) before any operational peer activation. The peer envelope HMAC does
+runtime instance. The Linux generation-state lock is held only during
+`allocateGeneration` and is released before the runtime begins serving.
+`TestRuntimeAllocatesNewGenerationAndIncarnationPerStart` constructs generation
+1 and then generation 2 without closing generation 1, so allocation
+serialization is **not** a runtime-lifetime exclusivity guarantee. This does
+not establish that either instance performed a peer mutation; it identifies
+the overlapping-replacement case to qualify. Prove shutdown/drain and
+replacement-process fencing (including an in-flight mutation and any
+cross-host/shared-state boundary) before operational peer activation. The peer envelope HMAC does
 not directly sign authority record/revision/state; canonical authority reread
 and work-owner checks are separate protections, and the signed-intent threat
 model requires explicit disposition.
