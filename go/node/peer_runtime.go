@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/SemperSupra/wow-sidecar/go/embodiment"
 	"github.com/SemperSupra/wow-sidecar/go/federation"
 )
 
@@ -107,15 +108,28 @@ func (r *Runtime) configurePeerRendezvous(
 	if verifyAuthority == nil {
 		return fmt.Errorf("peer rendezvous requires canonical authority verification")
 	}
-	destinationCard, err := r.Card()
-	if err != nil {
+	if _, err := r.Card(); err != nil {
 		return fmt.Errorf("build destination embodiment card: %w", err)
 	}
 	handler, err := NewPeerRendezvousHandler(PeerRendezvousHandlerConfig{
-		DestinationCard: destinationCard,
-		CurrentPeer:      r.peers.CurrentCard,
-		GuardCurrentPeer: r.peers.WithCurrentCard,
-		Credentials:      credentials,
+		CurrentDestination: func() (embodiment.Card, bool) {
+			card, err := r.Card()
+			if err != nil {
+				return embodiment.Card{}, false
+			}
+			return card, true
+		},
+		CurrentPeer: r.peers.CurrentCard,
+		GuardCurrentIdentity: func(sourceNodeID string, fn func(destination, source embodiment.Card) error) error {
+			destinationCard, err := r.Card()
+			if err != nil {
+				return fmt.Errorf("current destination is unavailable: %w", err)
+			}
+			return r.peers.WithCurrentCard(sourceNodeID, func(sourceCard embodiment.Card) error {
+				return fn(destinationCard, sourceCard)
+			})
+		},
+		Credentials:     credentials,
 		VerifyAuthority: verifyAuthority,
 		Rendezvous:      r.rendezvous,
 		Replay:          federation.NewReplayCache(),

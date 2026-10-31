@@ -1,6 +1,6 @@
 # G6.11c synthetic peer rendezvous handler
 
-Qualification projection for the bounded G6.11c handler primitive.
+Authority: `SemperSupra/wow-sidecar-private#79`.
 
 This slice composes peer authentication, canonical authority verification,
 replay admission and the local rendezvous store behind an injectable HTTP
@@ -13,12 +13,10 @@ Processing order is:
 ```text
 bounded body
 -> strict outer request
--> current source peer-card lookup + pairwise credential
--> current local destination-card binding
+-> current local destination card + current peer-card lookup + pairwise credential
 -> HMAC / source+destination generation/incarnation / freshness / payload digest
 -> strict operation payload
 -> canonical DLE authority reread
--> atomic current-source re-fence under observer guard
 -> replay admission
 -> idempotent local rendezvous mutation
 -> minimized response
@@ -26,20 +24,20 @@ bounded body
 
 Authority failure occurs before replay admission so an unavailable canonical
 authority source does not consume a request identity or mutate local rendezvous
-state. Because authority reread can take time, the source peer is re-read after
-authority succeeds. Final source verification, replay admission, and local
-mutation execute under the observer current-peer guard; the authority network
-read remains outside that guard.
+state.
 
 Exact duplicate signed requests are classified as duplicates but still flow to
-the already-qualified idempotent rendezvous operation. A destination restart or
-re-embodiment changes the current destination generation/incarnation and
-invalidates pre-restart signed requests before authority lookup or mutation. Reuse of the same replay
+the already-qualified idempotent rendezvous operation. Reuse of the same replay
 identity with a different signed message fails closed.
 
 This slice admits only remote `claim` and `complete`. Offer/notice/wake,
 generic capability invocation and durable peer inboxes remain out of scope.
 
-This handler began as a synthetic-only primitive. Runtime registration is a
-separate fail-closed composition step; live networking and deployment remain
-separate qualification boundaries.
+The handler takes the current local destination card as an injected dependency
+on every request so receiver restart/re-embodiment fencing cannot be satisfied
+from stale construction-time identity.
+
+Registration in `Runtime.Handler`, environment credential wiring, a sender
+client, and all live networking/deployment remain blocked until #72 explicitly
+releases the next boundary. Independent security validation #78 has passed the
+underlying G6.11a primitive.

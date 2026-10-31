@@ -1,0 +1,143 @@
+package wirejson
+
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
+
+type nestedWire struct {
+	State string `json:"state"`
+}
+
+type fixedWire struct {
+	Nested nestedWire      `json:"nested"`
+	Items  []nestedWire    `json:"items"`
+	Raw    json.RawMessage `json:"raw"`
+}
+
+type customDecoderWire struct {
+	State string `json:"state"`
+}
+
+type invalidTagWire struct {
+	State string `json:"bad\\name"`
+}
+
+type normalizedMapKey string
+
+func (k *normalizedMapKey) UnmarshalText(text []byte) error {
+	*k = normalizedMapKey(strings.TrimLeft(string(text), "0"))
+	return nil
+}
+
+func (c *customDecoderWire) UnmarshalJSON(data []byte) error {
+	type plain customDecoderWire
+	return json.Unmarshal(data, (*plain)(c))
+}
+
+func TestValidateRejectsDecodedDuplicateKeysAtEveryDepth(t *testing.T) {
+	for _, raw := range []string{
+		`{"nested":{"state":"a","state":"b"}}`,
+		`{"nested":{"st\u0061te":"a","state":"b"}}`,
+		`{"items":[{"state":"a","state":"b"}]}`,
+		`{"raw":{"x":1,"x":2}}`,
+	} {
+		if err := Validate[fixedWire]([]byte(raw)); err == nil {
+			t.Fatalf("duplicate key accepted: %s", raw)
+		}
+	}
+}
+
+func TestValidateRejectsStructCaseAliasesButAllowsMapCaseDistinctions(t *testing.T) {
+	for _, raw := range []string{
+		`{"nested":{"STATE":"a"}}`,
+		`{"nested":{"STATE":"a","state":"b"}}`,
+	} {
+		if err := Validate[fixedWire]([]byte(raw)); err == nil {
+			t.Fatalf("struct field case alias accepted: %s", raw)
+		}
+	}
+	if err := Validate[map[string]string]([]byte(`{"State":"upper","state":"lower"}`)); err != nil {
+		t.Fatalf("distinct map keys rejected: %v", err)
+	}
+}
+
+func TestValidateRejectsMapKeysThatCanCoerceDistinctJSONNames(t *testing.T) {
+	if err := Validate[map[int]string]([]byte(`{"1":"first","01":"second"}`)); err == nil {
+		t.Fatal("integer map keys that coerce distinct JSON names were accepted")
+	}
+	type customMap map[normalizedMapKey]string
+	if err := Validate[customMap]([]byte(`{"1":"first","01":"second"}`)); err == nil {
+		t.Fatal("text-unmarshaled map keys that coerce distinct JSON names were accepted")
+	}
+}
+
+func TestValidateAcceptsCanonicalUniqueKeys(t *testing.T) {
+	if err := Validate[fixedWire]([]byte(`{"nested":{"state":"open"},"items":[{"state":"closed"}],"raw":{"State":1,"state":2}}`)); err != nil {
+		t.Fatalf("canonical unique document rejected: %v", err)
+	}
+}
+
+func TestValidateRejectsMalformedTrailingOversizedAndDeepDocuments(t *testing.T) {
+	for _, raw := range []string{`{"nested":`, `{"nested":{"state":"ok"}} {}`, strings.Repeat(" ", MaxBytes+1)} {
+		if err := Validate[fixedWire]([]byte(raw)); err == nil {
+			t.Fatalf("invalid bounded document accepted (len=%d)", len(raw))
+		}
+	}
+	deep := strings.Repeat("[", MaxDepth+2) + `0` + strings.Repeat("]", MaxDepth+2)
+	if err := Validate[any]([]byte(deep)); err == nil {
+		t.Fatal("over-depth document accepted")
+	}
+}
+
+func TestValidateFailsClosedOnEmbeddedWireSchema(t *testing.T) {
+	type embedded struct{ nestedWire }
+	if err := Validate[embedded]([]byte(`{"state":"ok"}`)); err == nil {
+		t.Fatal("embedded wire schema without explicit field-resolution support accepted")
+	}
+}
+
+func TestValidateRejectsCaseAmbiguousAndCustomDecoderSchemas(t *testing.T) {
+	type ambiguous struct {
+		ID string `json:"id"`
+		Id string `json:"Id"`
+	}
+	if err := Validate[ambiguous]([]byte(`{"id":"a"}`)); err == nil {
+		t.Fatal("case-ambiguous wire schema accepted")
+	}
+	if err := Validate[json.RawMessage]([]byte(`{"state":"ok"}`)); err != nil {
+		t.Fatalf("RawMessage dynamic payload rejected: %v", err)
+	}
+	if err := Validate[customDecoderWire]([]byte(`{"state":"ok"}`)); err == nil {
+		t.Fatal("custom JSON decoder schema accepted without an explicit validator")
+	}
+}
+
+func TestValidateMatchesEncodingJSONInvalidTagFallback(t *testing.T) {
+	var decoded invalidTagWire
+	if err := json.Unmarshal([]byte(`{"STATE":"ok"}`), &decoded); err != nil || decoded.State != "ok" {
+		t.Fatalf("test input no longer follows encoding/json field fallback: decoded=%+v err=%v", decoded, err)
+	}
+	if err := Validate[invalidTagWire]([]byte(`{"STATE":"ok"}`)); err == nil {
+		t.Fatal("case alias accepted for field whose invalid tag falls back to Go name")
+	}
+}
+
+func FuzzValidateNoPanic(f *testing.F) {
+	for _, seed := range []string{
+		`{"nested":{"state":"open"}}`,
+		`{"nested":{"state":"closed","state":"open"}}`,
+		`{"nested":{"STATE":"open"}}`,
+		`{"raw":{"State":1,"state":2}}`,
+		`{"items":[{"state":"ok"}]}`, `null`, `[]`, `"text"`,
+	} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, raw string) {
+		if len(raw) > MaxBytes+1 {
+			t.Skip()
+		}
+		_ = Validate[fixedWire]([]byte(raw))
+	})
+}
