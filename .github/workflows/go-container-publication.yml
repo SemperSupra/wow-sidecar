@@ -489,7 +489,7 @@ jobs:
               -p 127.0.0.1:18080:8080 \
               "$ref" >/dev/null
             ready=false
-            for attempt in $(seq 1 30); do
+            for _ in $(seq 1 30); do
               if curl --fail --silent http://127.0.0.1:18080/healthz >/tmp/health.json; then
                 ready=true
                 break
@@ -583,7 +583,7 @@ jobs:
           set -euo pipefail
           {
             printf '\n### Durable publication receipt artifact\n'
-            printf -- '- artifact id: `%s`\n' "$ARTIFACT_ID"
-            printf -- '- artifact digest: `%s`\n' "$ARTIFACT_DIGEST"
+            printf -- '- artifact id: %s\n' "\`$ARTIFACT_ID\`"
+            printf -- '- artifact digest: %s\n' "\`$ARTIFACT_DIGEST\`"
             printf -- '- artifact URL: %s\n' "$ARTIFACT_URL"
           } >> "$GITHUB_STEP_SUMMARY"
