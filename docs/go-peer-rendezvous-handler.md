@@ -4,9 +4,12 @@ Authority: `SemperSupra/wow-sidecar-private#79`.
 
 This slice composes peer authentication, canonical authority verification,
 replay admission and the local rendezvous store behind an injectable HTTP
-handler used only by synthetic tests.
+handler exercised by synthetic tests and optionally registered by the Go daemon.
 
-The handler is deliberately **not registered** in the WOW daemon.
+Registration is **disabled by default**. Explicit environment opt-in and
+credential/control prerequisites are required; source integration does not
+authorize live peer mutation or deployment. See
+[the runtime guide](go-peer-rendezvous-runtime.md).
 
 Processing order is:
 
@@ -17,6 +20,7 @@ bounded body
 -> HMAC / source+destination generation/incarnation / freshness / payload digest
 -> strict operation payload
 -> canonical DLE authority reread
+-> guarded current source+destination identity re-verification
 -> replay admission
 -> idempotent local rendezvous mutation
 -> minimized response
@@ -33,11 +37,21 @@ identity with a different signed message fails closed.
 This slice admits only remote `claim` and `complete`. Offer/notice/wake,
 generic capability invocation and durable peer inboxes remain out of scope.
 
-The handler takes the current local destination card as an injected dependency
-on every request so receiver restart/re-embodiment fencing cannot be satisfied
-from stale construction-time identity.
+The handler fetches current destination identity on each request and requires a
+`GuardCurrentIdentity` callback after the canonical authority reread. That
+callback must keep both destination and peer identities valid through replay
+admission and mutation. The current runtime assigns its generation and
+incarnation when constructed; its observer guard serializes the source peer.
+Replacement-process overlap and cross-process destination fencing require
+separate qualification before operational activation.
 
-Registration in `Runtime.Handler`, environment credential wiring, a sender
-client, and all live networking/deployment remain blocked until #72 explicitly
-releases the next boundary. Independent security validation #78 has passed the
-underlying G6.11a primitive.
+The authority record, revision and state are verified through the canonical
+DLE authority reader but are not covered by the peer-envelope HMAC. The
+signed-authority binding threat model and negative tests are an unresolved
+activation gate, not a guarantee inferred from a successful synthetic run.
+
+Daemon registration and file-backed credential wiring exist only behind
+explicit opt-in. Live peer activation, production keys, remote-network changes,
+image publication, host deployments and Agent Dispatch operational promotion
+remain subject to separate owner admission. Independent security validation
+#78 covered the underlying G6.11a primitive, not these live boundaries.

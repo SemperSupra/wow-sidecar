@@ -54,7 +54,7 @@ The runtime binds:
 
 The mutation ordering remains:
 
-`strict/bounded decode -> source+destination authentication/fencing -> strict operation payload -> canonical authority reread -> atomic current-source re-fence -> replay admission -> idempotent local mutation -> minimized response`
+`strict/bounded decode -> source+destination authentication/fencing -> strict operation payload -> canonical authority reread -> guarded source+destination re-verification -> replay admission -> idempotent local mutation -> minimized response`
 
 Peer authentication does not establish task authority.
 
@@ -68,12 +68,28 @@ expired peer-card lease.
 
 Because canonical-authority reread can involve network I/O, the handler does not
 trust the source-card snapshot taken before that read. After authority succeeds,
-it acquires the observer current-peer guard, re-reads and re-verifies source
-generation/incarnation/lease and request freshness, then performs replay
-admission and the local idempotent rendezvous mutation while that observer
-binding remains stable. No network operation occurs while the observer guard is
-held. A peer that advances, fails observation, or expires during authority
-verification is rejected before replay or mutation.
+the handler invokes `GuardCurrentIdentity`: the runtime captures its current
+destination card and enters the observer's current-peer guard, then re-verifies
+both destination and source generation/incarnation/lease and request freshness.
+Replay admission and local idempotent rendezvous mutation occur while the
+source observer binding remains stable. No network operation is intentionally
+performed by the handler while the observer guard is held. A peer that
+advances, fails observation, or expires during authority verification is
+rejected before replay or mutation.
+
+The runtime's destination generation and incarnation are initialized once per
+runtime instance. The Linux generation-state lock is held only during
+`allocateGeneration` and is released before the runtime begins serving.
+`TestRuntimeAllocatesNewGenerationAndIncarnationPerStart` constructs generation
+1 and then generation 2 without closing generation 1, so allocation
+serialization is **not** a runtime-lifetime exclusivity guarantee. This does
+not establish that either instance performed a peer mutation; it identifies
+the overlapping-replacement case to qualify. Prove shutdown/drain and
+replacement-process fencing (including an in-flight mutation and any
+cross-host/shared-state boundary) before operational peer activation. The peer envelope HMAC does
+not directly sign authority record/revision/state; canonical authority reread
+and work-owner checks are separate protections, and the signed-intent threat
+model requires explicit disposition.
 
 ## Boundary
 
