@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -70,6 +71,20 @@ func peerHandlerDestinationCard(now time.Time) embodiment.Card {
 	}
 }
 
+func peerIdentityGuardForTest(destination CurrentDestinationLookup, peer CurrentPeerLookup) CurrentIdentityGuard {
+	return func(sourceNodeID string, fn func(destination, source embodiment.Card) error) error {
+		currentDestination, ok := destination()
+		if !ok {
+			return fmt.Errorf("destination identity unavailable")
+		}
+		currentPeer, ok := peer(sourceNodeID)
+		if !ok {
+			return fmt.Errorf("source identity unavailable")
+		}
+		return fn(currentDestination, currentPeer)
+	}
+}
+
 func peerHandlerService(t *testing.T, now time.Time) (*RendezvousService, string) {
 	t.Helper()
 	service, err := newRendezvousService(&RendezvousConfig{
@@ -103,23 +118,24 @@ func newPeerHandlerForTest(
 	t.Helper()
 	key := []byte("0123456789abcdef0123456789abcdef")
 	service, handoffID := peerHandlerService(t, now)
+	destinationLookup := func() (embodiment.Card, bool) { return peerHandlerDestinationCard(now), true }
+	peerLookup := func(nodeID string) (embodiment.Card, bool) {
+		if nodeID != "truenas-node" {
+			return embodiment.Card{}, false
+		}
+		return peerHandlerCard(now), true
+	}
 	handler, err := NewPeerRendezvousHandler(PeerRendezvousHandlerConfig{
-		CurrentDestination: func() (embodiment.Card, bool) {
-			return peerHandlerDestinationCard(now), true
-		},
-		CurrentPeer: func(nodeID string) (embodiment.Card, bool) {
-			if nodeID != "truenas-node" {
-				return embodiment.Card{}, false
-			}
-			return peerHandlerCard(now), true
-		},
-		Credentials:     peerHandlerCredentials(t, key),
-		VerifyAuthority: verify,
-		Rendezvous:      service,
-		Replay:          federation.NewReplayCache(),
-		Now:             func() time.Time { return now },
-		MaxSkew:         2 * time.Minute,
-		ReplayTTL:       5 * time.Minute,
+		CurrentDestination:   destinationLookup,
+		CurrentPeer:          peerLookup,
+		GuardCurrentIdentity: peerIdentityGuardForTest(destinationLookup, peerLookup),
+		Credentials:          peerHandlerCredentials(t, key),
+		VerifyAuthority:      verify,
+		Rendezvous:           service,
+		Replay:               federation.NewReplayCache(),
+		Now:                  func() time.Time { return now },
+		MaxSkew:              2 * time.Minute,
+		ReplayTTL:            5 * time.Minute,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -137,17 +153,17 @@ func signedPeerWireRequest(
 ) []byte {
 	t.Helper()
 	envelope, err := federation.SignPeerEnvelope(federation.PeerEnvelope{
-		Schema:              federation.PeerEnvelopeSchema,
-		SourceNodeID:        "truenas-node",
-		SourceGeneration:    7,
-		SourceIncarnationID: "0123456789abcdef0123456789abcdef",
+		Schema:                   federation.PeerEnvelopeSchema,
+		SourceNodeID:             "truenas-node",
+		SourceGeneration:         7,
+		SourceIncarnationID:      "0123456789abcdef0123456789abcdef",
 		DestinationNodeID:        "oci-edge-node",
 		DestinationGeneration:    11,
 		DestinationIncarnationID: "abcdefabcdefabcdefabcdefabcdefab",
 		RequestID:                requestID,
-		IssuedAt:            now.Format(time.RFC3339Nano),
-		Operation:           operation,
-		PayloadDigest:       federation.PayloadDigest(payload),
+		IssuedAt:                 now.Format(time.RFC3339Nano),
+		Operation:                operation,
+		PayloadDigest:            federation.PayloadDigest(payload),
 	}, key)
 	if err != nil {
 		t.Fatal(err)
@@ -280,16 +296,17 @@ func TestPeerRendezvousHandlerRejectsStalePeerBeforeAuthority(t *testing.T) {
 	key := []byte("0123456789abcdef0123456789abcdef")
 	service, handoffID := peerHandlerService(t, now)
 	authorityCalls := 0
+	destinationLookup := func() (embodiment.Card, bool) { return peerHandlerDestinationCard(now), true }
+	peerLookup := func(string) (embodiment.Card, bool) {
+		card := peerHandlerCard(now)
+		card.Generation = 8
+		return card, true
+	}
 	handler, err := NewPeerRendezvousHandler(PeerRendezvousHandlerConfig{
-		CurrentDestination: func() (embodiment.Card, bool) {
-			return peerHandlerDestinationCard(now), true
-		},
-		CurrentPeer: func(string) (embodiment.Card, bool) {
-			card := peerHandlerCard(now)
-			card.Generation = 8
-			return card, true
-		},
-		Credentials: peerHandlerCredentials(t, key),
+		CurrentDestination:   destinationLookup,
+		CurrentPeer:          peerLookup,
+		GuardCurrentIdentity: peerIdentityGuardForTest(destinationLookup, peerLookup),
+		Credentials:          peerHandlerCredentials(t, key),
 		VerifyAuthority: func(context.Context, string, string, string) error {
 			authorityCalls++
 			return nil
@@ -319,17 +336,18 @@ func TestPeerRendezvousHandlerRejectsStaleDestinationBeforeAuthority(t *testing.
 	key := []byte("0123456789abcdef0123456789abcdef")
 	service, handoffID := peerHandlerService(t, now)
 	authorityCalls := 0
+	destinationLookup := func() (embodiment.Card, bool) {
+		card := peerHandlerDestinationCard(now)
+		card.Generation++
+		card.IncarnationID = "11111111111111111111111111111111"
+		return card, true
+	}
+	peerLookup := func(string) (embodiment.Card, bool) { return peerHandlerCard(now), true }
 	handler, err := NewPeerRendezvousHandler(PeerRendezvousHandlerConfig{
-		CurrentDestination: func() (embodiment.Card, bool) {
-			card := peerHandlerDestinationCard(now)
-			card.Generation++
-			card.IncarnationID = "11111111111111111111111111111111"
-			return card, true
-		},
-		CurrentPeer: func(string) (embodiment.Card, bool) {
-			return peerHandlerCard(now), true
-		},
-		Credentials: peerHandlerCredentials(t, key),
+		CurrentDestination:   destinationLookup,
+		CurrentPeer:          peerLookup,
+		GuardCurrentIdentity: peerIdentityGuardForTest(destinationLookup, peerLookup),
+		Credentials:          peerHandlerCredentials(t, key),
 		VerifyAuthority: func(context.Context, string, string, string) error {
 			authorityCalls++
 			return nil
@@ -351,6 +369,88 @@ func TestPeerRendezvousHandlerRejectsStaleDestinationBeforeAuthority(t *testing.
 	}
 	if authorityCalls != 0 {
 		t.Fatal("authority verifier called before destination fencing completed")
+	}
+}
+
+func TestPeerRendezvousHandlerRejectsIdentityAdvanceDuringAuthorityBeforeReplayOrMutation(t *testing.T) {
+	for _, advance := range []string{"source", "destination"} {
+		t.Run(advance, func(t *testing.T) {
+			now := time.Now().UTC()
+			key := []byte("0123456789abcdef0123456789abcdef")
+			service, handoffID := peerHandlerService(t, now)
+			currentPeer := peerHandlerCard(now)
+			currentDestination := peerHandlerDestinationCard(now)
+			authorityCalls := 0
+			destinationLookup := func() (embodiment.Card, bool) { return currentDestination, true }
+			peerLookup := func(nodeID string) (embodiment.Card, bool) {
+				if nodeID != currentPeer.NodeID {
+					return embodiment.Card{}, false
+				}
+				return currentPeer, true
+			}
+			handler, err := NewPeerRendezvousHandler(PeerRendezvousHandlerConfig{
+				CurrentDestination:   destinationLookup,
+				CurrentPeer:          peerLookup,
+				GuardCurrentIdentity: peerIdentityGuardForTest(destinationLookup, peerLookup),
+				Credentials:          peerHandlerCredentials(t, key),
+				VerifyAuthority: func(context.Context, string, string, string) error {
+					authorityCalls++
+					if authorityCalls == 1 {
+						if advance == "source" {
+							currentPeer.Generation++
+							currentPeer.IncarnationID = "11111111111111111111111111111111"
+						} else {
+							currentDestination.Generation++
+							currentDestination.IncarnationID = "11111111111111111111111111111111"
+						}
+					}
+					return nil
+				},
+				Rendezvous: service,
+				Replay:     federation.NewReplayCache(),
+				Now:        func() time.Time { return now },
+				MaxSkew:    2 * time.Minute,
+				ReplayTTL:  5 * time.Minute,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			payload := json.RawMessage(`{"operation":"claim","handoff_id":"` + handoffID + `","launch_id":"launch-identity-fence"}`)
+			wire := signedPeerWireRequest(t, now, key, "peerreq-identity-fence", "rendezvous.claim", payload)
+			blocked := servePeerRequest(handler, wire)
+			if blocked.Code != http.StatusUnauthorized {
+				t.Fatalf("identity advanced during authority verification status=%d body=%q", blocked.Code, blocked.Body.String())
+			}
+			if authorityCalls != 1 {
+				t.Fatalf("authority calls=%d want=1", authorityCalls)
+			}
+
+			ctx := context.WithValue(context.Background(), rendezvousPrincipalContextKey{}, rendezvous.Principal{
+				ClientID: "durable-control",
+				Subject:  peerTestAuthorityRef + "@" + peerTestAuthorityRev,
+			})
+			state, err := service.store.Get(ctx, handoffID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if state.Status != "offered" || state.Claim != nil {
+				t.Fatalf("stale request mutated handoff: %+v", state)
+			}
+
+			currentPeer = peerHandlerCard(now)
+			currentDestination = peerHandlerDestinationCard(now)
+			retry := servePeerRequest(handler, wire)
+			if retry.Code != http.StatusOK {
+				t.Fatalf("restored-identity retry status=%d body=%q", retry.Code, retry.Body.String())
+			}
+			if response := decodePeerResponse(t, retry); response.Duplicate {
+				t.Fatal("identity-rejected request incorrectly consumed its replay ID")
+			}
+			if authorityCalls != 2 {
+				t.Fatalf("authority calls after retry=%d want=2", authorityCalls)
+			}
+		})
 	}
 }
 
