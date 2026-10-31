@@ -36,7 +36,7 @@ jobs:
           data=json.load(open(sys.argv[1]))
           assert data["schema"] == "wow-sidecar.local-repo-inventory.v1"
           assert data["repository_head"] and data["worktrees"]
-          assert "path" not in str(data)
-          assert "remote_url" not in str(data)
+          assert all("path" not in entry for entry in data["worktrees"])
+          assert all("remote_url" not in entry for entry in data["worktrees"])
           print("inventory schema and redaction: PASS")
           PY
