@@ -54,7 +54,7 @@ The runtime binds:
 
 The mutation ordering remains:
 
-`strict/bounded decode -> source+destination authentication/fencing -> strict operation payload -> canonical authority reread -> atomic current-source re-fence -> replay admission -> idempotent local mutation -> minimized response`
+`strict/bounded decode -> source+destination authentication/fencing -> strict operation payload -> canonical authority reread -> guarded source+destination re-verification -> replay admission -> idempotent local mutation -> minimized response`
 
 Peer authentication does not establish task authority.
 
@@ -68,12 +68,23 @@ expired peer-card lease.
 
 Because canonical-authority reread can involve network I/O, the handler does not
 trust the source-card snapshot taken before that read. After authority succeeds,
-it acquires the observer current-peer guard, re-reads and re-verifies source
-generation/incarnation/lease and request freshness, then performs replay
-admission and the local idempotent rendezvous mutation while that observer
-binding remains stable. No network operation occurs while the observer guard is
-held. A peer that advances, fails observation, or expires during authority
-verification is rejected before replay or mutation.
+the handler invokes `GuardCurrentIdentity`: the runtime captures its current
+destination card and enters the observer's current-peer guard, then re-verifies
+both destination and source generation/incarnation/lease and request freshness.
+Replay admission and local idempotent rendezvous mutation occur while the
+source observer binding remains stable. No network operation is intentionally
+performed by the handler while the observer guard is held. A peer that
+advances, fails observation, or expires during authority verification is
+rejected before replay or mutation.
+
+The runtime's destination generation and incarnation are initialized once per
+runtime instance, but this does not by itself establish *cross-process*
+exclusivity when an old instance overlaps a replacement generation. Prove
+shutdown/drain and replacement-process fencing (including an in-flight
+mutation) before any operational peer activation. The peer envelope HMAC does
+not directly sign authority record/revision/state; canonical authority reread
+and work-owner checks are separate protections, and the signed-intent threat
+model requires explicit disposition.
 
 ## Boundary
 
