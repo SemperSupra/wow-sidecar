@@ -1,11 +1,9 @@
 #!/usr/bin/env bash
-# Lightweight local GitHub Actions preflight; never deploys or dispatches jobs.
-# --static: run established linters already installed; --act-list: only list
-# workflows; --act-run is deliberately NOT implemented.
+# Source-only CI preflight: no release, credentials or target deployment.
 set -euo pipefail
 
 usage() {
-  printf '%s\n' 'Usage: bash scripts/ci-preflight.sh --static|--act-list' >&2
+  printf '%s\n' 'Usage: bash scripts/ci-preflight.sh --static|--act-list|--act-go' >&2
   exit 2
 }
 
@@ -28,9 +26,31 @@ case "$1" in
     ;;
   --act-list)
     command -v act >/dev/null || { echo 'BLOCKED: act not installed' >&2; exit 3; }
-    # Only list workflow jobs. Deliberately do not run workflow commands, use
-    # credentials, access Docker, publish images, or mutate the host.
     act --list
+    ;;
+  --act-go)
+    command -v act >/dev/null || { echo 'BLOCKED: act not installed' >&2; exit 3; }
+    image="${WOW_ACT_RUNNER_IMAGE:-}"
+    # Reject mutable tags, empty references, arguments hidden in whitespace,
+    # and unverified images. The owner must obtain a trusted digest out-of-band.
+    if [[ "$image" != *@sha256:* || "$image" == *[[:space:]]* ]]; then
+      echo 'BLOCKED: set WOW_ACT_RUNNER_IMAGE to an approved digest-pinned image' >&2
+      exit 3
+    fi
+    digest="${image##*@sha256:}"
+    if [[ "${#digest}" -ne 64 || "$digest" =~ [^0-9a-f] || "${image%@sha256:*}" == "" ]]; then
+      echo 'BLOCKED: malformed SHA256 container image reference' >&2
+      exit 3
+    fi
+    # An explicit allowlist selects ONE source-only conformance job.
+    # No auto-detection, production credentials, private workflow or publish.
+    env -u GITHUB_TOKEN -u GH_TOKEN -u GITHUB_APP_ID -u GITHUB_PRIVATE_KEY \
+      act workflow_dispatch \
+      -W .github/workflows/go-conformance.yml \
+      -j conformance \
+      -P "ubuntu-24.04=$image" \
+      --pull=false \
+      --secret-file /dev/null
     ;;
   *) usage ;;
 esac
