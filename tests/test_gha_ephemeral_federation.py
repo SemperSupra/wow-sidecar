@@ -57,6 +57,21 @@ class EphemeralRepTests(unittest.TestCase):
         with self.assertRaisesRegex(rep.RepError,'probe_process_exited'):
             rep.wait_for([proc],1234,'/healthz',lambda x:True,'probe')
 
+    def test_first_failure_survives_cleanup_failure(self):
+        with tempfile.TemporaryDirectory() as d:
+            receipt=Path(d)/'receipt.json'; binary=Path(d)/'binary';binary.write_bytes(b'x')
+            proc=mock.Mock(); proc.poll.return_value=None
+            version=json.dumps({'product':'wow-sidecar','source_revision':REV}).encode()
+            with mock.patch.object(rep.subprocess,'check_output',return_value=version), \
+                 mock.patch.object(rep.subprocess,'Popen',return_value=proc), \
+                 mock.patch.object(rep,'wait_for',side_effect=rep.RepError('initial_failure')), \
+                 mock.patch.object(rep,'stop',side_effect=rep.RepError('cleanup_failure')):
+                self.assertEqual(rep.run(binary,REV,receipt),1)
+            result=json.loads(receipt.read_text())
+            self.assertEqual(result['first_failure'],'initial_failure')
+            self.assertEqual(result['cleanup'],'FAIL')
+            self.assertIn('cleanup_failure',result['cleanup_errors'])
+
     def test_bad_revision_and_error_are_sanitized(self):
         with tempfile.TemporaryDirectory() as d:
             receipt=Path(d)/'receipt.json'

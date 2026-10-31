@@ -29,6 +29,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest discover -s tests -p test_gha_ephemeral_federation.py -v
+          go test -race ./go/embodiment ./go/federation
           sha="$(git rev-parse HEAD)"
           CGO_ENABLED=0 go build -trimpath -buildvcs=false \
             -ldflags="-s -w -X main.sourceRevision=$sha -X main.buildVersion=0.0.0-gha" \
