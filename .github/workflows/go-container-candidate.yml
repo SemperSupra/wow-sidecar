@@ -110,7 +110,7 @@ jobs:
             expected="$1"
             cleanup
             docker run -d               --name wow-sidecar-go-smoke               --read-only               --mount "type=bind,src=$state,dst=/var/lib/wow-sidecar"               -e WOW_NODE_ID=ci-cloud-node               -e WOW_LOCALITY=cloud               -e WOW_LISTEN_ADDR=0.0.0.0:8080               -p 127.0.0.1:18080:8080               wow-sidecar-go:amd64 >/dev/null
-            for attempt in $(seq 1 30); do
+            for _ in $(seq 1 30); do
               if curl --fail --silent http://127.0.0.1:18080/healthz >/tmp/health.json; then
                 break
               fi
