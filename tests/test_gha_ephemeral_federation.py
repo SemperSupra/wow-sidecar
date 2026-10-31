@@ -1,8 +1,10 @@
 import importlib.util
+import http.server
 import json
 import os
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -18,6 +20,38 @@ class EphemeralRepTests(unittest.TestCase):
         self.assertFalse(set(env) & {'GITHUB_TOKEN','AWS_SECRET_ACCESS_KEY','WOW_CONTROL_REPOSITORY','HTTPS_PROXY'})
         self.assertEqual(env['WOW_PEER_URLS'], 'http://127.0.0.1:1235')
         self.assertEqual(env['WOW_LOCALITY'], 'cloud')
+
+    def test_loopback_probe_does_not_follow_redirects(self):
+        hits = []
+        class Foreign(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                hits.append(True)
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'{}')
+            def log_message(self, *args):
+                pass
+        class Redirect(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(302)
+                self.send_header('Location', f'http://127.0.0.1:{foreign.server_port}/foreign')
+                self.end_headers()
+            def log_message(self, *args):
+                pass
+        with http.server.ThreadingHTTPServer(('127.0.0.1', 0), Foreign) as foreign:
+            with http.server.ThreadingHTTPServer(('127.0.0.1', 0), Redirect) as source:
+                threads = [threading.Thread(target=s.serve_forever) for s in (foreign, source)]
+                for thread in threads:
+                    thread.start()
+                try:
+                    with self.assertRaises(rep.urllib.error.HTTPError):
+                        rep.get(source.server_port, '/v1/card')
+                    self.assertEqual(hits, [])
+                finally:
+                    source.shutdown()
+                    foreign.shutdown()
+                    for thread in threads:
+                        thread.join()
 
     def test_card_health_and_identity_bound(self):
         card = {'schema':'wow-sidecar.embodiment-card.v1','protocol':'wow-embodiment/v1','node_id':'node','locality':'cloud','generation':1,'incarnation_id':'a'*32,'endpoints':[],'capabilities':['system.identity']}

@@ -20,6 +20,10 @@ import uuid
 class RepError(Exception):
     pass
 
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
 def child_env(node, port, state, peer=None, locality='cloud'):
     env = {'PATH': '/usr/bin:/bin', 'LANG': 'C', 'WOW_NODE_ID': node,
            'WOW_LOCALITY': locality, 'WOW_LISTEN_ADDR': f'127.0.0.1:{port}',
@@ -36,7 +40,7 @@ def free_port():
 
 def get(port, path):
     # Loopback only and no proxies inherited from the caller.
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
     with opener.open(f'http://127.0.0.1:{port}{path}', timeout=2) as response:
         data = response.read(65537)
         if len(data) > 65536:
