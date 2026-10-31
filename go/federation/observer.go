@@ -23,10 +23,10 @@ const (
 )
 
 const (
-	StatusNeverObserved   = "NEVER_OBSERVED"
-	StatusObserved        = "OBSERVED"
-	StatusFetchFailed     = "FETCH_FAILED"
-	StatusCardRejected    = "CARD_REJECTED"
+	StatusNeverObserved    = "NEVER_OBSERVED"
+	StatusObserved         = "OBSERVED"
+	StatusFetchFailed      = "FETCH_FAILED"
+	StatusCardRejected     = "CARD_REJECTED"
 	StatusIdentityMismatch = "IDENTITY_MISMATCH"
 	StatusNodeAlreadyBound = "NODE_ALREADY_BOUND"
 )
@@ -39,16 +39,16 @@ type peerRecord struct {
 }
 
 type PeerView struct {
-	PeerRef        string                   `json:"peer_ref"`
-	NodeID         string                   `json:"node_id,omitempty"`
-	Generation     uint64                   `json:"generation,omitempty"`
-	IncarnationID  string                   `json:"incarnation_id,omitempty"`
-	Locality       string                   `json:"locality,omitempty"`
-	Presence       embodiment.Presence      `json:"presence"`
-	Reachability   embodiment.Reachability  `json:"reachability"`
-	LeaseExpiresAt string                   `json:"lease_expires_at,omitempty"`
-	ObservedAt     string                   `json:"observed_at,omitempty"`
-	Status         string                   `json:"status"`
+	PeerRef        string                  `json:"peer_ref"`
+	NodeID         string                  `json:"node_id,omitempty"`
+	Generation     uint64                  `json:"generation,omitempty"`
+	IncarnationID  string                  `json:"incarnation_id,omitempty"`
+	Locality       string                  `json:"locality,omitempty"`
+	Presence       embodiment.Presence     `json:"presence"`
+	Reachability   embodiment.Reachability `json:"reachability"`
+	LeaseExpiresAt string                  `json:"lease_expires_at,omitempty"`
+	ObservedAt     string                  `json:"observed_at,omitempty"`
+	Status         string                  `json:"status"`
 }
 
 type Snapshot struct {
@@ -149,12 +149,18 @@ func NewObserver(endpoints []string, client *http.Client, now func() time.Time) 
 	if client == nil {
 		client = &http.Client{Timeout: 5 * time.Second}
 	}
+	// A configured peer is the only allowed HTTP destination. Copy the client so
+	// overriding redirect behavior does not mutate a caller-owned client.
+	observerClient := *client
+	observerClient.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
 	return &Observer{
 		endpoints:   normalized,
 		records:     records,
 		nodeSources: map[string]string{},
 		tracker:     embodiment.NewTracker(),
-		client:      client,
+		client:      &observerClient,
 		now:         now,
 	}, nil
 }
