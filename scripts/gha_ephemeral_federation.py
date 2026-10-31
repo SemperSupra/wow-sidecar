@@ -20,9 +20,9 @@ import uuid
 class RepError(Exception):
     pass
 
-def child_env(node, port, state, peer=None):
+def child_env(node, port, state, peer=None, locality='cloud'):
     env = {'PATH': '/usr/bin:/bin', 'LANG': 'C', 'WOW_NODE_ID': node,
-           'WOW_LOCALITY': 'cloud', 'WOW_LISTEN_ADDR': f'127.0.0.1:{port}',
+           'WOW_LOCALITY': locality, 'WOW_LISTEN_ADDR': f'127.0.0.1:{port}',
            'WOW_GENERATION_STATE_FILE': str(state), 'WOW_LEASE_SECONDS': '15',
            'WOW_PEER_POLL_SECONDS': '5'}
     if peer is not None:
@@ -57,26 +57,31 @@ def wait_for(procs, port, path, predicate, stage):
         time.sleep(.25)
     raise RepError(stage + '_timeout')
 
-def valid_card(card, node, health, revision):
-    return (card.get('node_id') == node and card.get('locality') == 'cloud'
+def valid_card(card, node, health, revision, locality='cloud'):
+    return (card.get('schema') == 'wow-sidecar.embodiment-card.v1'
+            and card.get('protocol') == 'wow-embodiment/v1'
+            and card.get('node_id') == node and card.get('locality') == locality
             and card.get('generation') == health.get('generation')
             and card.get('incarnation_id') == health.get('incarnation_id')
             and health.get('node_id') == node and health.get('status') == 'ok'
             and health.get('source_revision') == revision
-            and isinstance(card.get('generation'), int) and card['generation'] > 0
-            and isinstance(card.get('incarnation_id'), str) and bool(card['incarnation_id'])
+            and type(card.get('generation')) is int and card['generation'] > 0
+            and isinstance(card.get('incarnation_id'), str)
+            and re.fullmatch(r'[0-9a-f]{32}', card['incarnation_id']) is not None
             and card.get('endpoints') == [] and card.get('capabilities') == ['system.identity'])
 
 def peer_is(value, node, status, generation=None, incarnation=None):
     peers = value.get('peers', [])
-    if value.get('configured_peers') != 1 or len(peers) != 1:
+    if (value.get('configured_peers') != 1 or len(peers) != 1
+            or (status == 'OBSERVED' and value.get('observed_peers') != 1)):
         return False
     p = peers[0]
     return (p.get('node_id') == node and p.get('status') == status
             and (generation is None or p.get('generation') == generation)
             and (incarnation is None or p.get('incarnation_id') == incarnation)
             and (status != 'OBSERVED' or (p.get('reachability') == 'REACHABLE' and p.get('presence') == 'ONLINE'))
-            and (status != 'FETCH_FAILED' or p.get('reachability') == 'UNREACHABLE'))
+            and (status != 'FETCH_FAILED' or (p.get('reachability') == 'UNREACHABLE'
+                 and p.get('presence') in ('DEGRADED', 'OFFLINE'))))
 
 def stop(proc):
     if proc is None:
@@ -123,35 +128,43 @@ def run(binary, revision, receipt):
         ap, bp = free_port(), free_port()
         while bp == ap:
             bp = free_port()
-        def start(node, port, peer=None):
+        def start(node, port, peer=None, locality='cloud'):
             state = root / node
             state.mkdir(exist_ok=True)
-            p = subprocess.Popen([str(binary)], env=child_env(node, port, state / 'generation.json', peer),
+            p = subprocess.Popen([str(binary)], env=child_env(node, port, state / 'generation.json', peer, locality),
                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             procs.append(p)
             return p
         result['stage'] = 'launch'
-        observer = start(a, ap, bp)
-        peer = start(b, bp)
+        observer = start(a, ap, bp, 'sovereign')
+        peer = start(b, bp, ap)
         ah = wait_for(procs, ap, '/healthz', lambda x: x.get('node_id') == a, 'observer_health')
         bh = wait_for(procs, bp, '/healthz', lambda x: x.get('node_id') == b, 'peer_health')
-        if not valid_card(get(ap, '/v1/card'), a, ah, revision) or not valid_card(get(bp, '/v1/card'), b, bh, revision):
+        if (ah.get('generation') != 1 or bh.get('generation') != 1
+                or not valid_card(get(ap, '/v1/card'), a, ah, revision, 'sovereign')
+                or not valid_card(get(bp, '/v1/card'), b, bh, revision)):
             raise RepError('card_health_identity_mismatch')
         result['stage'] = 'observe_initial'
         wait_for(procs, ap, '/v1/peers', lambda x: peer_is(x,b,'OBSERVED',bh['generation'],bh['incarnation_id']), 'observe_initial')
+        wait_for(procs, bp, '/v1/peers', lambda x: peer_is(x,a,'OBSERVED',ah['generation'],ah['incarnation_id']), 'observe_reverse')
         result['initial'] = {'generation': bh['generation'], 'incarnation_id': bh['incarnation_id'], 'status': 'OBSERVED'}
+        result['reverse_initial'] = {'generation': ah['generation'], 'incarnation_id': ah['incarnation_id'], 'status': 'OBSERVED'}
         result['stage'] = 'partition'
         stop(peer)
         procs.remove(peer)
         wait_for(procs, ap, '/v1/peers', lambda x: peer_is(x,b,'FETCH_FAILED',bh['generation'],bh['incarnation_id']), 'partition')
         result['partition'] = 'FETCH_FAILED'
         result['stage'] = 'rejoin'
-        peer = start(b, bp)
+        peer = start(b, bp, ap)
         nh = wait_for(procs, bp, '/healthz', lambda x: x.get('node_id') == b and x.get('generation', 0) > bh['generation'], 'rejoin_health')
-        if nh.get('incarnation_id') == bh['incarnation_id'] or not valid_card(get(bp, '/v1/card'), b, nh, revision):
+        if (nh.get('generation') != bh['generation'] + 1
+                or nh.get('incarnation_id') == bh['incarnation_id']
+                or not valid_card(get(bp, '/v1/card'), b, nh, revision)):
             raise RepError('rejoin_identity_mismatch')
         wait_for(procs, ap, '/v1/peers', lambda x: peer_is(x,b,'OBSERVED',nh['generation'],nh['incarnation_id']), 'rejoin')
+        wait_for(procs, bp, '/v1/peers', lambda x: peer_is(x,a,'OBSERVED',ah['generation'],ah['incarnation_id']), 'rejoin_reverse')
         result['rejoined'] = {'generation': nh['generation'], 'incarnation_id': nh['incarnation_id'], 'status': 'OBSERVED'}
+        result['reverse_rejoined'] = 'OBSERVED'
         result['stage'] = 'cleanup'
     except Exception as exc:
         result['first_failure'] = str(exc) if isinstance(exc, RepError) else type(exc).__name__
@@ -162,7 +175,17 @@ def run(binary, revision, receipt):
                 stop(proc)
             except Exception as exc:
                 errors.append(str(exc) if isinstance(exc, RepError) else type(exc).__name__)
-        if root is not None:
+        survivors = [proc for proc in procs if proc.poll() is None]
+        result['remaining_processes'] = len(survivors)
+        if survivors:
+            errors.append('child_processes_survived')
+            # Keep only process-local cleanup details out of the uploaded receipt.
+            if root is not None:
+                try:
+                    (root / 'survivor-pids').write_text(''.join(str(p.pid) + '\n' for p in survivors))
+                except OSError:
+                    errors.append('survivor_pid_record_failed')
+        if root is not None and not survivors:
             try:
                 shutil.rmtree(root)
                 if root.exists():
