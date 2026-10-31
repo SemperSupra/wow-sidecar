@@ -320,3 +320,67 @@ func TestObserverRejectsRedirectsWithDefaultAndCustomClients(t *testing.T) {
 		t.Error("caller-owned redirect callback was modified")
 	}
 }
+
+func TestObserverRejectsAmbientProxyAndDialsDirectly(t *testing.T) {
+	var proxyHits atomic.Int32
+	proxyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		proxyHits.Add(1)
+		http.Error(w, "ambient proxy must not be contacted", http.StatusBadGateway)
+	}))
+	defer proxyServer.Close()
+
+	var peerHits atomic.Int32
+	peerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		peerHits.Add(1)
+		_ = json.NewEncoder(w).Encode(card("direct-peer-node", 1, strings.Repeat("e", 32), time.Now().Add(time.Minute)))
+	}))
+	defer peerServer.Close()
+
+	t.Setenv("HTTP_PROXY", proxyServer.URL)
+	t.Setenv("http_proxy", proxyServer.URL)
+
+	custom := &http.Client{Timeout: time.Second}
+	for _, tc := range []struct {
+		name   string
+		client *http.Client
+	}{
+		{"default", nil},
+		{"custom_default_transport", custom},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			proxyHits.Store(0)
+			peerHits.Store(0)
+			observer, err := NewObserver([]string{peerServer.URL}, tc.client, time.Now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tr, ok := observer.client.Transport.(*http.Transport); !ok || tr.Proxy != nil {
+				t.Errorf("observer transport Proxy is not nil: %v", observer.client.Transport)
+			}
+			observer.PollOnce(context.Background())
+			view := observer.Snapshot()
+			if proxyHits.Load() != 0 {
+				t.Errorf("ambient proxy was contacted %d times", proxyHits.Load())
+			}
+			if peerHits.Load() != 1 {
+				t.Errorf("direct peer was contacted %d times, want 1", peerHits.Load())
+			}
+			if len(view.Peers) != 1 || view.Peers[0].Status != StatusObserved || view.ObservedPeers != 1 {
+				t.Errorf("peer should be OBSERVED: %#v", view)
+			}
+		})
+	}
+	if custom.Transport != nil {
+		t.Error("caller-owned client Transport was mutated")
+	}
+
+	callerTransport := &http.Transport{}
+	callerClient := &http.Client{Transport: callerTransport}
+	obsWithTransport, err := NewObserver([]string{peerServer.URL}, callerClient, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obsWithTransport.client.Transport != callerTransport {
+		t.Error("caller-supplied transport was not preserved")
+	}
+}
