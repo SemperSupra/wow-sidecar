@@ -5,6 +5,7 @@ on:
     paths:
       - 'scripts/ci-preflight.sh'
       - 'scripts/README-ci-preflight.md'
+      - 'scripts/test-ci-preflight.sh'
       - '.github/workflows/ci-preflight.yml'
   workflow_dispatch:
 
@@ -41,3 +42,9 @@ jobs:
           set -euo pipefail
           bash -n scripts/ci-preflight.sh
           bash scripts/ci-preflight.sh --static
+      - name: Verify mocked Act allowlist without Docker
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n scripts/test-ci-preflight.sh
+          bash scripts/test-ci-preflight.sh
