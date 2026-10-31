@@ -151,9 +151,18 @@ func NewObserver(endpoints []string, client *http.Client, now func() time.Time) 
 	}
 	// A configured peer is the only allowed HTTP destination. Copy the client so
 	// overriding redirect behavior does not mutate a caller-owned client.
+	// Ambient proxy routing is explicitly disabled for peer observation unless
+	// the caller provides their own explicit transport.
 	observerClient := *client
 	observerClient.CheckRedirect = func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
+	}
+	if observerClient.Transport == nil {
+		if dt, ok := http.DefaultTransport.(*http.Transport); ok {
+			transport := dt.Clone()
+			transport.Proxy = nil
+			observerClient.Transport = transport
+		}
 	}
 	return &Observer{
 		endpoints:   normalized,
