@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -220,7 +221,6 @@ func TestObserverRejectsOversizeAndDuplicateNodeBinding(t *testing.T) {
 	}
 }
 
-
 func TestObserverCurrentCardRequiresCurrentlyObservedBinding(t *testing.T) {
 	now := time.Date(2026, 10, 4, 18, 30, 0, 0, time.UTC)
 	source := &mutableCardServer{
@@ -270,5 +270,53 @@ func TestObserverCurrentCardRequiresCurrentlyObservedBinding(t *testing.T) {
 	}
 	if guardCalls != 0 {
 		t.Fatalf("guard callback ran for fetch-failed peer: %d", guardCalls)
+	}
+}
+
+func TestObserverRejectsRedirectsWithDefaultAndCustomClients(t *testing.T) {
+	var hits atomic.Int32
+	foreign := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		_ = json.NewEncoder(w).Encode(card("redirected-node", 1, strings.Repeat("f", 32), time.Now().Add(time.Minute)))
+	}))
+	defer foreign.Close()
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, foreign.URL+"/v1/card", http.StatusFound)
+	}))
+	defer source.Close()
+
+	var redirectCallbacks atomic.Int32
+	custom := &http.Client{Timeout: time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
+		redirectCallbacks.Add(1)
+		return nil
+	}}
+	for _, tc := range []struct {
+		name   string
+		client *http.Client
+	}{
+		{"default", nil}, {"custom_allow_redirects", custom},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hits.Store(0)
+			observer, err := NewObserver([]string{source.URL}, tc.client, time.Now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			observer.PollOnce(context.Background())
+			view := observer.Snapshot()
+			if hits.Load() != 0 {
+				t.Errorf("redirect target contacted %d times", hits.Load())
+			}
+			if len(view.Peers) != 1 || view.Peers[0].Status != StatusFetchFailed || view.ObservedPeers != 0 {
+				t.Errorf("redirect should be FETCH_FAILED: %#v", view)
+			}
+		})
+	}
+	if custom.CheckRedirect == nil || custom.Timeout != time.Second {
+		t.Error("caller-owned client was modified")
+	}
+	before := redirectCallbacks.Load()
+	if err := custom.CheckRedirect(nil, nil); err != nil || redirectCallbacks.Load() != before+1 {
+		t.Error("caller-owned redirect callback was modified")
 	}
 }
