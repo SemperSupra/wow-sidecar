@@ -411,9 +411,14 @@ class GitHubRefClaimStore:
             raise AuthorizationDeniedError(f"HTTP {status}: Access denied reading receipt")
         if status != 200:
             raise AmbiguousClaimError(f"HTTP {status}: Unable to establish receipt state")
-        commit_sha = found.get("object", {}).get("sha")
+        if not isinstance(found, dict):
+            raise EffectError("receipt ref has invalid commit identity")
+        found_object = found.get("object")
+        if not isinstance(found_object, dict):
+            raise EffectError("receipt ref has invalid commit identity")
+        commit_sha = found_object.get("sha")
         if (found.get("ref") != self.receipt_ref_prefix + request_id
-                or found.get("object", {}).get("type") != "commit"
+                or found_object.get("type") != "commit"
                 or not isinstance(commit_sha, str) or not _SHA_RE.fullmatch(commit_sha)):
             raise EffectError("receipt ref has invalid commit identity")
 
@@ -431,6 +436,8 @@ class GitHubRefClaimStore:
             raise AuthorizationDeniedError(f"HTTP {status}: Access denied reading receipt commit")
         if status != 200:
             raise AmbiguousClaimError(f"HTTP {status}: Receipt ancestry cannot be established")
+        if not isinstance(commit, dict):
+            raise EffectError("receipt commit is not a GitHub object")
         parents = commit.get("parents")
         if (
             commit.get("sha") != commit_sha
@@ -451,6 +458,8 @@ class GitHubRefClaimStore:
             raise AuthorizationDeniedError(f"HTTP {status}: Access denied reading receipt body")
         if status != 200:
             raise AmbiguousClaimError(f"HTTP {status}: Receipt body unavailable")
+        if not isinstance(payload, dict):
+            raise EffectError("receipt body is not a GitHub object")
         if payload.get("type") != "file" or payload.get("encoding") != "base64":
             raise EffectError("receipt body is not a base64 GitHub file")
         encoded = payload.get("content")
@@ -474,10 +483,13 @@ class GitHubRefClaimStore:
         if status != 200:
             raise EffectError("bound request unavailable; legacy claims require reconciliation")
         try:
-            if payload.get("type") != "file" or payload.get("encoding") != "base64":
+            if not isinstance(payload, dict) or payload.get("type") != "file" or payload.get("encoding") != "base64":
                 raise ValueError("invalid file")
-            data = json.loads(base64.b64decode("".join(payload["content"].split()), validate=True))
-            if set(data) != {"schema", "request", "request_digest", "runner_sha"}:
+            encoded = payload.get("content")
+            if not isinstance(encoded, str):
+                raise ValueError("invalid base64 content")
+            data = json.loads(base64.b64decode("".join(encoded.split()), validate=True))
+            if not isinstance(data, dict) or set(data) != {"schema", "request", "request_digest", "runner_sha"}:
                 raise ValueError("invalid binding")
             request = EffectRequest(**data["request"])
             if (data["schema"] != "wow.idempotent-effect-claim.v1"
@@ -488,7 +500,9 @@ class GitHubRefClaimStore:
                 raise ValueError("invalid binding")
             status, commit = self._http_request("GET",
                 f"/repos/{self.owner}/{self.repo}/git/commits/{claim_sha}")
-            if (status != 200 or commit.get("sha") != claim_sha
+            if status != 200 or not isinstance(commit, dict):
+                raise ValueError("claim commit unavailable or malformed")
+            if (commit.get("sha") != claim_sha
                     or commit.get("parents") != [{"sha": data["runner_sha"]}]):
                 # GitHub parent objects include URLs: compare only exact SHA list.
                 parents = commit.get("parents", [])
