@@ -31,7 +31,7 @@ func allocateGeneration(path, nodeID string) (uint64, error) {
 	}
 
 	lockPath := path + ".lock"
-	lock, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0o600)
+	lock, err := openGenerationLock(lockPath)
 	if err != nil {
 		return 0, fmt.Errorf("open generation lock: %w", err)
 	}
@@ -159,6 +159,31 @@ func sortedUnique(values []string) ([]string, error) {
 	return out, nil
 }
 
+// openGenerationLock verifies that allocation and mutation use a private,
+// owned, regular, single-link inode. O_NOFOLLOW prevents last-component
+// symlinks; O_NONBLOCK prevents a special-file open from hanging before stat.
+// This does NOT defend mutable parent directories, bind mounts, or remote
+// filesystem flock semantics. These remain target-HIL admission constraints.
+func openGenerationLock(path string) (*os.File, error) {
+    fd, err := syscall.Open(path, syscall.O_RDWR|syscall.O_CREAT|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0o600)
+    if err != nil {
+        return nil, fmt.Errorf("open private generation lock: %w", err)
+    }
+    lock := os.NewFile(uintptr(fd), path)
+    info, err := lock.Stat()
+    if err != nil {
+        _ = lock.Close()
+        return nil, fmt.Errorf("stat generation lock: %w", err)
+    }
+    stat, ok := info.Sys().(*syscall.Stat_t)
+    if !info.Mode().IsRegular() || !ok || stat.Nlink != 1 ||
+        stat.Uid != uint32(os.Geteuid()) || info.Mode().Perm()&0o077 != 0 {
+        _ = lock.Close()
+        return nil, fmt.Errorf("generation lock must be an owned private single-link regular file")
+    }
+    return lock, nil
+}
+
 // withCurrentGenerationLease holds a read lock on the same state lock used by
 // allocateGeneration for the entire admitted local callback. A new generation
 // cannot be allocated concurrently with that callback on the same local
@@ -171,7 +196,7 @@ func withCurrentGenerationLease(path, nodeID string, expected uint64, fn func() 
     if path == "" || nodeID == "" || expected == 0 || fn == nil {
         return fmt.Errorf("generation guard requires valid identity and callback")
     }
-    lock, err := os.OpenFile(path+".lock", os.O_RDWR|os.O_CREATE, 0o600)
+    lock, err := openGenerationLock(path+".lock")
     if err != nil {
         return fmt.Errorf("open generation guard lock: %w", err)
     }
