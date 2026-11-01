@@ -337,7 +337,14 @@ class GitHubRefClaimStore:
         path = f"/repos/{self.owner}/{self.repo}/git/ref/{self.claim_ref_prefix.removeprefix('refs/')}{request_id}"
         status, data = self._http_request("GET", path)
         if status == 200:
-            obj = data.get("object", {})
+            # GitHub's successful transport status is NOT proof that a claim
+            # ref has the required structure or immutable commit identity.
+            # Refuse malformed provider data without raising AttributeError.
+            if not isinstance(data, dict):
+                raise EffectError("claim ref returned malformed identity")
+            obj = data.get("object")
+            if not isinstance(obj, dict):
+                raise EffectError("claim ref returned malformed identity")
             sha = obj.get("sha")
             if (data.get("ref") == self.claim_ref_prefix + request_id
                     and obj.get("type") == "commit"
@@ -372,7 +379,10 @@ class GitHubRefClaimStore:
             # an independent read confirms that the exact ref exists.
             try:
                 observed = self.read_claim(request_id)
-            except (AmbiguousClaimError, AuthorizationDeniedError) as exc:
+            except EffectError as exc:
+                # Includes provider read failures, authorization denials and
+                # syntactically successful but invalid ref/object/SHA data.
+                # None establishes a competing owner; preserve UNKNOWN.
                 raise AmbiguousClaimError(
                     "HTTP 422: existing claim could not be verified"
                 ) from exc
