@@ -126,7 +126,12 @@ func (r *Runtime) configurePeerRendezvous(
 				return fmt.Errorf("current destination is unavailable: %w", err)
 			}
 			return r.peers.WithCurrentCard(sourceNodeID, func(sourceCard embodiment.Card) error {
-				return fn(destinationCard, sourceCard)
+				return withCurrentGenerationLease(
+					r.config.GenerationStateFile,
+					r.config.NodeID,
+					r.generation,
+					func() error { return fn(destinationCard, sourceCard) },
+				)
 			})
 		},
 		Credentials:     credentials,
