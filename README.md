@@ -48,8 +48,18 @@ Examples:
 
 Domain-specific scheduling, application lifecycle policy, or product authority remains in the owning domain.
 
-## Status
+## Status — 2026-10-31
 
-Generic extraction and public-safe non-live qualification are complete through the protocol/runtime, bounded integrations, immutable App-native artifact, and public TrueNAS App render. The historical Agent Dispatch implementation remains the admitted live compatibility bridge while private TrueNAS HIL and state-preserving cutover/rollback remain pending.
+The original Go `v0.0.1` multi-architecture OCI image is **published and
+native-qualified** from source `82887aba7cf3a4dbf03af28714d01805bd53e030`.
+Later Go source, including peer-runtime integration and security test coverage,
+is not automatically part of that released image.
 
-No live installation, migration, cutover, or private-HIL claim should be inferred from the public render/artifact evidence alone.
+See the [release/source/operational frontier](docs/releases/frontier-2026-10-31.md)
+for exact identities, evidence, holds, and the next bring-up ladder.
+
+The historical Agent Dispatch implementation remains the admitted live
+compatibility bridge. Private TrueNAS/OCI HIL, cross-process peer-mutation
+fencing, state-preserving migration, and rollback acceptance remain pending.
+No live installation, peer activation, generic claim/dispatch, migration,
+cutover, or private-HIL claim follows from public CI or render evidence alone.
