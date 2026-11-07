@@ -113,7 +113,7 @@ jobs:
               -p 127.0.0.1:18080:8080 \
               "wow-sidecar-go:native-${{ matrix.goarch }}" >/dev/null
             ready=false
-            for attempt in $(seq 1 30); do
+            for _ in $(seq 1 30); do
               if curl --fail --silent http://127.0.0.1:18080/healthz >/tmp/health.json; then
                 ready=true
                 break
