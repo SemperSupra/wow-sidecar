@@ -172,6 +172,32 @@ func TestRequestAndProfileParsingRejectDuplicateFields(t *testing.T) {
 	}
 }
 
+func TestAuthorityDocumentsRejectNonFiniteNumbers(t *testing.T) {
+	corpus := loadCorpus(t)
+	request := string(marshalVector(t, corpus.RequestVectors[0].Value))
+	profile := string(marshalVector(t, corpus.ProfileVectors[0].Value))
+	cases := []struct {
+		name  string
+		input string
+		parse func([]byte) error
+	}{
+		{"request-nan", strings.Replace(request, `"no_retry":`, `"val":NaN,"no_retry":`, 1), func(raw []byte) error { _, err := ParseRequest(raw); return err }},
+		{"request-inf", strings.Replace(request, `"no_retry":`, `"val":Infinity,"no_retry":`, 1), func(raw []byte) error { _, err := ParseRequest(raw); return err }},
+		{"request-neg-inf", strings.Replace(request, `"no_retry":`, `"val":-Infinity,"no_retry":`, 1), func(raw []byte) error { _, err := ParseRequest(raw); return err }},
+		{"request-overflow", strings.Replace(request, `"no_retry":`, `"val":1e1000,"no_retry":`, 1), func(raw []byte) error { _, err := ParseRequest(raw); return err }},
+		{"profile-nan", strings.Replace(profile, `"kind":`, `"val":NaN,"kind":`, 1), func(raw []byte) error { _, err := ParseProfile(raw); return err }},
+		{"profile-inf", strings.Replace(profile, `"kind":`, `"val":Infinity,"kind":`, 1), func(raw []byte) error { _, err := ParseProfile(raw); return err }},
+		{"profile-overflow", strings.Replace(profile, `"kind":`, `"val":1e1000,"kind":`, 1), func(raw []byte) error { _, err := ParseProfile(raw); return err }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.parse([]byte(tc.input)); err == nil {
+				t.Fatalf("%s unexpectedly accepted non-finite number", tc.name)
+			}
+		})
+	}
+}
+
 func TestRequestConformanceVectors(t *testing.T) {
 	corpus := loadCorpus(t)
 	index := vectorIndex(corpus.RequestVectors)

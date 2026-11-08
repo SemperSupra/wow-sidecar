@@ -87,6 +87,14 @@ class OperatorProfileTests(unittest.TestCase):
         with self.assertRaisesRegex(SidecarError, "sha256"):
             load_profile(latest, repository_token_provider=lambda _repository: "synthetic-token")
 
+    def test_profile_file_rejects_duplicate_operator_field(self):
+        raw = json.dumps(profile_value()).replace('"kind":', '"kind":"shadow","kind":', 1)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "profile.json"
+            path.write_text(raw, encoding="utf-8")
+            with self.assertRaisesRegex(SidecarError, "duplicate JSON object key"):
+                load_profile_file(path, repository_token_provider=lambda _repository: "synthetic-token")
+
     def test_profile_file_round_trip_and_duplicate_rejection(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "profile.json"
