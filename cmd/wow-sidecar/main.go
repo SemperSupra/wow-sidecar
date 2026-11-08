@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -18,6 +19,17 @@ var (
 	sourceRevision = "development"
 	buildVersion   = "0.0.0-dev"
 )
+
+type inFlightTracker struct {
+	handler http.Handler
+	wg      sync.WaitGroup
+}
+
+func (t *inFlightTracker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	t.wg.Add(1)
+	defer t.wg.Done()
+	t.handler.ServeHTTP(w, r)
+}
 
 func main() {
 	if err := run(); err != nil {
@@ -58,9 +70,11 @@ func run() error {
 		return err
 	}
 
+	tracker := &inFlightTracker{handler: runtime.Handler()}
+
 	server := &http.Server{
 		Addr:              runtime.ListenAddr(),
-		Handler:           runtime.Handler(),
+		Handler:           tracker,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      10 * time.Second,
@@ -98,6 +112,7 @@ func run() error {
 		if err := server.Shutdown(shutdownCtx); err != nil {
 			return fmt.Errorf("shutdown: %w", err)
 		}
+		tracker.wg.Wait()
 		err := <-errs
 		if err != nil && err != http.ErrServerClosed {
 			return fmt.Errorf("serve after shutdown: %w", err)
