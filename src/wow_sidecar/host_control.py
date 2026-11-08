@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import math
 import re
 import urllib.parse
 from dataclasses import dataclass
@@ -37,6 +38,38 @@ def _require(condition: bool, message: str) -> None:
 
 def _canonical_json(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+def parse_unique_json(data: str) -> Any:
+    """Preserve the exact authority document's object-name and numeric semantics."""
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            _require(key not in result, f"duplicate JSON object key {key!r}")
+            result[key] = value
+        return result
+
+    def reject_constant(constant: str) -> Any:
+        raise SidecarError(f"non-standard JSON numeric constant {constant!r} rejected")
+
+    try:
+        parsed = json.loads(data, object_pairs_hook=unique_object, parse_constant=reject_constant)
+    except json.JSONDecodeError as exc:
+        raise SidecarError(f"invalid JSON: {exc}") from exc
+
+    _verify_finite_numbers(parsed)
+    return parsed
+
+
+def _verify_finite_numbers(value: Any) -> None:
+    if isinstance(value, float):
+        _require(math.isfinite(value), "non-finite JSON number rejected")
+    elif isinstance(value, dict):
+        for v in value.values():
+            _verify_finite_numbers(v)
+    elif isinstance(value, list):
+        for item in value:
+            _verify_finite_numbers(item)
 
 
 def _repository_parts(repository: str) -> tuple[str, str]:
@@ -162,7 +195,9 @@ class GitControlPlane:
         _require(value.get("encoding") == "base64" and isinstance(value.get("content"), str), f"{path} is not base64 content")
         try:
             raw = base64.b64decode(value["content"], validate=False)
-            parsed = json.loads(raw.decode("utf-8"))
+            parsed = parse_unique_json(raw.decode("utf-8"))
+        except SidecarError:
+            raise
         except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise SidecarError(f"{path} is not valid UTF-8 JSON") from exc
         _require(isinstance(parsed, dict), f"{path} must contain a JSON object")

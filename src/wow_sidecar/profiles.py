@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from .errors import SidecarError
-from .host_control import OperatorHandler
+from .host_control import OperatorHandler, parse_unique_json
 from .integrations.pinned_repository import (
     PinnedRepositoryOperator,
     PinnedRepositoryOperatorSpec,
@@ -128,7 +128,9 @@ def load_profile_file(
     repository_token_provider: Callable[[str], str],
 ) -> LoadedOperatorProfile:
     try:
-        value = json.loads(Path(path).read_text(encoding="utf-8"))
+        value = parse_unique_json(Path(path).read_text(encoding="utf-8"))
+    except SidecarError:
+        raise
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise SidecarError(f"cannot load operator profile document: {type(exc).__name__}") from exc
     return load_profile(

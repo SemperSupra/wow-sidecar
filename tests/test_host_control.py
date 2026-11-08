@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import base64
+import json
 import unittest
 
 from wow_sidecar.errors import SidecarError
 from wow_sidecar.host_control import (
     CLAIM_REF_PREFIX,
+    GitControlPlane,
     HostOperatorRequest,
     REQUEST_SCHEMA,
     process_pending_once,
@@ -85,6 +88,44 @@ class FakeControl:
 
 
 class HostOperatorRequestTests(unittest.TestCase):
+    def test_control_plane_rejects_duplicate_authority_bytes(self):
+        request = json.dumps(request_value(), separators=(",", ":"))
+        cases = (
+            request.replace('"request_id":', '"request_id":"shadow","request_id":', 1),
+            request.replace('"request_id":', '"request_\\u0069d":"shadow","request_id":', 1),
+            request.replace('"no_retry":', '"no_retry":false,"no_retry":', 1),
+            request.replace('"inputs":', '"inputs":{"items":[{"ref":"a","ref":"b"}]},"discarded":', 1),
+        )
+
+        class Client:
+            def installation_token_for_repository(self, _repository):
+                return "synthetic-token"
+
+            def _request_json(self, *_args, **_kwargs):
+                return {"type": "file", "encoding": "base64", "content": self.content}
+
+        client = Client()
+        control = GitControlPlane(client, "Example/control")
+        for raw in cases:
+            with self.subTest(raw=raw[:80]):
+                client.content = base64.b64encode(raw.encode()).decode()
+                with self.assertRaisesRegex(SidecarError, "duplicate JSON object key"):
+                    control.read_json_at_commit("a" * 40, "request.json")
+
+        nonfinite_cases = (
+            request.replace('"no_retry":', '"val":NaN,"no_retry":', 1),
+            request.replace('"no_retry":', '"val":Infinity,"no_retry":', 1),
+            request.replace('"no_retry":', '"val":-Infinity,"no_retry":', 1),
+            request.replace('"no_retry":', '"val":1e1000,"no_retry":', 1),
+            request.replace('"no_retry":', '"val":-1e1000,"no_retry":', 1),
+            request.replace('"inputs":{', '"inputs":{"items":[1, NaN],', 1),
+        )
+        for raw in nonfinite_cases:
+            with self.subTest(nonfinite=raw[:80]):
+                client.content = base64.b64encode(raw.encode()).decode()
+                with self.assertRaises(SidecarError):
+                    control.read_json_at_commit("a" * 40, "request.json")
+
     def test_rejects_shell_string_extension(self):
         value = request_value()
         value["command"] = "rm -rf /"

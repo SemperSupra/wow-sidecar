@@ -158,6 +158,17 @@ func scanJSONValue(decoder *json.Decoder) error {
 	}
 	delim, isDelim := token.(json.Delim)
 	if !isDelim {
+		if f, isFloat := token.(float64); isFloat {
+			if math.IsInf(f, 0) || math.IsNaN(f) {
+				return errors.New("non-finite JSON number")
+			}
+		}
+		if num, isNum := token.(json.Number); isNum {
+			f, err := num.Float64()
+			if err != nil || math.IsInf(f, 0) || math.IsNaN(f) {
+				return errors.New("non-finite JSON number")
+			}
+		}
 		return nil
 	}
 	switch delim {
