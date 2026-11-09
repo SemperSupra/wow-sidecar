@@ -8,6 +8,7 @@ on:
       - 'cmd/wow-sidecar/**'
       - 'Dockerfile.wow-go'
       - '.github/workflows/go-native-arch-runtime.yml'
+      - 'tools/wow-native-readonly-envelope.py'
   workflow_dispatch:
 
 permissions:
@@ -138,3 +139,22 @@ jobs:
           run_generation 2
           trap - EXIT
           cleanup
+
+      - name: R7 read-only capacity and SIGKILL restart at bounded 2CPU/128MiB
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 -m py_compile tools/wow-native-readonly-envelope.py
+          mkdir -p evidence
+          python3 tools/wow-native-readonly-envelope.py \
+            "wow-sidecar-go:native-${{ matrix.goarch }}" \
+            "${{ matrix.goarch }}" 2>&1 | tee "evidence/wow-native-envelope-${{ matrix.goarch }}.log"
+
+      - name: Archive sanitized read-only envelope
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: wow-native-envelope-${{ matrix.goarch }}
+          path: evidence/wow-native-envelope-${{ matrix.goarch }}.log
+          retention-days: 7
+          if-no-files-found: warn
