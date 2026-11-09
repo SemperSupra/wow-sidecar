@@ -12,9 +12,12 @@ has an exclusive generation lease, or that peer activation is safe.
 ## Execute and retain evidence
 
 The companion public pull-request workflow downloads the *official* TLA+
-`tlaplus/tlaplus` v1.8.0 **prerelease** tool JAR by its immutable version URL
-and validates the GH-published artifact SHA-256
-`011267fca25d0752cf18894dd585cd28b96960c112ea8a20b823ea770e7e10cd`.
+`tlaplus/tlaplus` v1.8.0 release tool JAR by its versioned asset URL
+and validates the GitHub release asset's published SHA-256
+`e1f11b75c4b5bc4478ba0ac5cb6ae28e40a01b0016bc33e0aa97da22dfdbcd7f`.
+The older prerelease pin `011267fc...` failed on 2026-11-09: the
+same-tag asset is now published with a different digest. A version URL alone
+is not immutable; verify GitHub's release-asset digest before pin updates.
 Do not substitute a rolling URL or unverified JAR.
 
 With that JAR and Java >= 11:
