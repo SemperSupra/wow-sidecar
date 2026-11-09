@@ -77,7 +77,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          java -cp "$RUNNER_TEMP/tla2tools.jar" tla2sany.SANY formal/TwoClaimantRecoveryUnsafe.tla
+          ( cd formal && java -cp "$RUNNER_TEMP/tla2tools.jar" tla2sany.SANY TwoClaimantRecoveryUnsafe.tla )
           set +e
           java -XX:+UseParallelGC -jar "$RUNNER_TEMP/tla2tools.jar" \
             -workers 1 -config formal/TwoClaimantRecoveryUnsafe.cfg \
