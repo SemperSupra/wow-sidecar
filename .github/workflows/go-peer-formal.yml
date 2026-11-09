@@ -63,4 +63,37 @@ jobs:
           fi
           echo "EXPECTED_COUNTEREXAMPLE_PASS: invariant caught unsafe stale mutation"
           grep -E 'Invariant StaleNeverMutates is violated|Error: Invariant' "$RUNNER_TEMP/peer-fence-unsafe-tlc.log"
-
+      - name: Parse and check two-claimant durable UNKNOWN model
+        shell: bash
+        run: |
+          set -euo pipefail
+          java -cp "$RUNNER_TEMP/tla2tools.jar" tla2sany.SANY formal/TwoClaimantRecovery.tla
+          java -XX:+UseParallelGC -jar "$RUNNER_TEMP/tla2tools.jar" \
+            -workers 1 -config formal/TwoClaimantRecovery.cfg \
+            formal/TwoClaimantRecovery.tla \
+            | tee "$RUNNER_TEMP/two-claimant-safe.log"
+          grep -Eq 'Model checking completed' "$RUNNER_TEMP/two-claimant-safe.log"
+      - name: Unsafe retry after crash must violate at-most-one effect
+        shell: bash
+        run: |
+          set -euo pipefail
+          java -cp "$RUNNER_TEMP/tla2tools.jar" tla2sany.SANY formal/TwoClaimantRecoveryUnsafe.tla
+          set +e
+          java -XX:+UseParallelGC -jar "$RUNNER_TEMP/tla2tools.jar" \
+            -workers 1 -config formal/TwoClaimantRecoveryUnsafe.cfg \
+            formal/TwoClaimantRecoveryUnsafe.tla \
+            > "$RUNNER_TEMP/two-claimant-unsafe.log" 2>&1
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo 'FAIL: unsafe model unexpectedly passed' >&2
+            cat "$RUNNER_TEMP/two-claimant-unsafe.log"
+            exit 1
+          fi
+          if ! grep -Eq 'Invariant AtMostOneEffect is violated' "$RUNNER_TEMP/two-claimant-unsafe.log"; then
+            echo 'FAIL: unsafe model failed for an unrelated reason' >&2
+            cat "$RUNNER_TEMP/two-claimant-unsafe.log"
+            exit 1
+          fi
+          echo 'EXPECTED_COUNTEREXAMPLE_PASS: unsafe retry violates AtMostOneEffect'
+          grep -E 'Invariant AtMostOneEffect is violated' "$RUNNER_TEMP/two-claimant-unsafe.log"
