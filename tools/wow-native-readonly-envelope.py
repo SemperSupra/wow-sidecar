@@ -135,6 +135,10 @@ def main(image, arch):
                 and kill.returncode == 0)
         finally:
             stop()
+            # Restore only this disposable directory to the runner user so
+            # TemporaryDirectory can erase a state path owned by uid 10001.
+            cli("sudo", "chown", "-R", f"{os.getuid()}:{os.getgid()}",
+                str(state), check=False)
     print("WOW_R7_ENVELOPE=" + json.dumps(report, sort_keys=True), flush=True)
     if not report.get("read_only_oracle_pass"):
         sys.exit(3)
