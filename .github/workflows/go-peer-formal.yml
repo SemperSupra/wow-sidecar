@@ -29,7 +29,7 @@ jobs:
             --output "$RUNNER_TEMP/tla2tools.jar" \
             https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar
           printf '%s  %s\n' \
-            '011267fca25d0752cf18894dd585cd28b96960c112ea8a20b823ea770e7e10cd' \
+            'e1f11b75c4b5bc4478ba0ac5cb6ae28e40a01b0016bc33e0aa97da22dfdbcd7f' \
             "$RUNNER_TEMP/tla2tools.jar" | sha256sum --check -
           java -version
       - name: Parse and model-check peer-generation invariants
