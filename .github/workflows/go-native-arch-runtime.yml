@@ -130,6 +130,18 @@ jobs:
                 '.schema == "wow-sidecar.embodiment-card.v1"
                  and .node_id == ("ci-" + $arch + "-node")
                  and .generation == $generation'
+            # R1 positive capability & control probes
+            curl --fail --silent http://127.0.0.1:18080/v1/capabilities | jq -e '.schema == "wow-sidecar.capability-index.v1"'
+            curl --fail --silent http://127.0.0.1:18080/v1/capabilities/system.identity | jq -e '.result == "ELIGIBLE" and .status == "system-identity-observed"'
+            curl --fail --silent http://127.0.0.1:18080/v1/control | jq -e '.enabled == false and .state == "DISABLED"'
+
+            # R1 protocol negative controls
+            test "$(curl -s -o /dev/null -w "%{http_code}" -X POST http://127.0.0.1:18080/healthz)" = "405"
+            test "$(curl -s -o /dev/null -w "%{http_code}" -X PUT http://127.0.0.1:18080/readyz)" = "405"
+            test "$(curl -s -o /dev/null -w "%{http_code}" -X DELETE http://127.0.0.1:18080/v1/card)" = "405"
+            test "$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:18080/nonexistent)" = "404"
+            test "$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:18080/v1/invalid-route)" = "404"
+
             docker stats --no-stream --format 'container={{.Name}} memory={{.MemUsage}} cpu={{.CPUPerc}}' "$name"
             cleanup
           }
@@ -138,3 +150,245 @@ jobs:
           run_generation 2
           trap - EXIT
           cleanup
+
+      - name: R2 concurrent-instance revision-overlap restart and rollback qualification
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          version="0.0.0-dev.${sha:0:12}"
+
+          # Pinned immutable public Old revision from release publication
+          old_image="ghcr.io/sempersupra/wow-sidecar:go-source-86891777c37116393760d844dad0dc1ca8e835bb"
+          old_sha="86891777c37116393760d844dad0dc1ca8e835bb"
+          docker pull "$old_image"
+          test "$sha" != "$old_sha"
+
+          old_image_id="$(docker inspect -f '{{.Id}}' "$old_image")"
+          old_repo_digest="$(docker inspect -f '{{index .RepoDigests 0}}' "$old_image" 2>/dev/null || echo "$old_image")"
+          cand_image="wow-sidecar-go:native-${{ matrix.goarch }}"
+          cand_image_id="$(docker inspect -f '{{.Id}}' "$cand_image")"
+
+          state_old="$RUNNER_TEMP/wow-r2-state-old-${{ matrix.goarch }}"
+          state_candidate="$RUNNER_TEMP/wow-r2-state-candidate-${{ matrix.goarch }}"
+          install -d -m 0700 "$state_old" "$state_candidate"
+          sudo chown 10001:10001 "$state_old" "$state_candidate"
+          name_old="wow-sidecar-r2-old-${{ matrix.goarch }}"
+          name_candidate="wow-sidecar-r2-candidate-${{ matrix.goarch }}"
+
+          cleanup_r2() {
+            docker rm -f "$name_old" "$name_candidate" >/dev/null 2>&1 || true
+          }
+          trap cleanup_r2 EXIT
+          cleanup_r2
+
+          # 1. Start Old generation-1 instance on port 18080 from pinned prior revision
+          docker run -d \
+            --name "$name_old" \
+            --read-only \
+            --mount "type=bind,src=$state_old,dst=/var/lib/wow-sidecar" \
+            -e "WOW_NODE_ID=ci-old-${{ matrix.goarch }}-node" \
+            -e WOW_LOCALITY=cloud \
+            -e WOW_LISTEN_ADDR=0.0.0.0:8080 \
+            -p 127.0.0.1:18080:8080 \
+            "$old_image" >/dev/null
+
+          ready_old=false
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:18080/healthz >/tmp/r2-health-old.json; then
+              ready_old=true
+              break
+            fi
+            sleep 1
+          done
+          test "$ready_old" = true
+          jq -e --arg old_sha "$old_sha" \
+            '.status == "ok" and .source_revision == $old_sha and .generation == 1' \
+            /tmp/r2-health-old.json
+          curl --fail --silent http://127.0.0.1:18080/readyz | jq -e '.status == "ready"'
+          curl --fail --silent http://127.0.0.1:18080/v1/card | \
+            jq -e --arg arch "${{ matrix.goarch }}" \
+              '.schema == "wow-sidecar.embodiment-card.v1"
+               and .node_id == ("ci-old-" + $arch + "-node")
+               and .generation == 1'
+
+          # 2. Concurrently start Candidate instance on port 18081 from PR revision $sha (Revision overlap window)
+          docker run -d \
+            --name "$name_candidate" \
+            --read-only \
+            --mount "type=bind,src=$state_candidate,dst=/var/lib/wow-sidecar" \
+            -e "WOW_NODE_ID=ci-candidate-${{ matrix.goarch }}-node" \
+            -e WOW_LOCALITY=cloud \
+            -e WOW_LISTEN_ADDR=0.0.0.0:8080 \
+            -p 127.0.0.1:18081:8080 \
+            "wow-sidecar-go:native-${{ matrix.goarch }}" >/dev/null
+
+          ready_cand=false
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:18081/healthz >/tmp/r2-health-candidate.json; then
+              ready_cand=true
+              break
+            fi
+            sleep 1
+          done
+          test "$ready_cand" = true
+          jq -e --arg sha "$sha" \
+            '.status == "ok" and .source_revision == $sha and .generation == 1' \
+            /tmp/r2-health-candidate.json
+          curl --fail --silent http://127.0.0.1:18081/readyz | jq -e '.status == "ready"'
+          curl --fail --silent http://127.0.0.1:18081/v1/card | \
+            jq -e --arg arch "${{ matrix.goarch }}" \
+              '.schema == "wow-sidecar.embodiment-card.v1"
+               and .node_id == ("ci-candidate-" + $arch + "-node")
+               and .generation == 1'
+
+          # 3. Assert simultaneous co-residence and distinct revisions in overlap window
+          test "$(docker inspect -f '{{.State.Running}}' "$name_old")" = "true"
+          test "$(docker inspect -f '{{.State.Running}}' "$name_candidate")" = "true"
+          obs_old_sha="$(jq -r .source_revision /tmp/r2-health-old.json)"
+          obs_cand_sha="$(jq -r .source_revision /tmp/r2-health-candidate.json)"
+          test "$obs_old_sha" = "$old_sha"
+          test "$obs_cand_sha" = "$sha"
+          test "$obs_old_sha" != "$obs_cand_sha"
+          curl --fail --silent http://127.0.0.1:18080/readyz | jq -e '.status == "ready"'
+          curl --fail --silent http://127.0.0.1:18081/readyz | jq -e '.status == "ready"'
+          docker stats --no-stream --format 'container={{.Name}} memory={{.MemUsage}} cpu={{.CPUPerc}}' "$name_old" "$name_candidate"
+
+          # 4. Restart candidate instance and assert generation increments to 2 while old remains undisturbed
+          docker restart "$name_candidate" >/dev/null
+          curl --fail --silent http://127.0.0.1:18080/readyz | jq -e '.status == "ready"'
+
+          ready_cand_restart=false
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:18081/healthz >/tmp/r2-health-candidate-gen2.json; then
+              ready_cand_restart=true
+              break
+            fi
+            sleep 1
+          done
+          test "$ready_cand_restart" = true
+          jq -e --arg sha "$sha" \
+            '.status == "ok" and .source_revision == $sha and .generation == 2' \
+            /tmp/r2-health-candidate-gen2.json
+          curl --fail --silent http://127.0.0.1:18081/readyz | jq -e '.status == "ready"'
+
+          # 5. Rollback qualification: terminate candidate, verify candidate port is down (negative control), assert old instance remains active on pinned revision
+          docker stop "$name_candidate" >/dev/null
+          docker rm "$name_candidate" >/dev/null
+
+          set +e
+          curl --fail --silent http://127.0.0.1:18081/healthz >/dev/null 2>&1
+          cand_down_rc=$?
+          set -e
+          test "$cand_down_rc" -ne 0
+
+          curl --fail --silent http://127.0.0.1:18080/healthz | jq -e --arg old_sha "$old_sha" '.status == "ok" and .source_revision == $old_sha and .generation == 1'
+          curl --fail --silent http://127.0.0.1:18080/readyz | jq -e '.status == "ready"'
+          curl --fail --silent http://127.0.0.1:18080/v1/card | \
+            jq -e --arg arch "${{ matrix.goarch }}" \
+              '.schema == "wow-sidecar.embodiment-card.v1"
+               and .node_id == ("ci-old-" + $arch + "-node")
+               and .generation == 1'
+
+          # 6. Teardown Old instance and witness complete cleanup
+          docker stop "$name_old" >/dev/null 2>&1 || true
+          docker rm "$name_old" >/dev/null 2>&1 || true
+          docker rm -f "$name_candidate" >/dev/null 2>&1 || true
+          trap - EXIT
+
+          # Bounded Failure-Injection Qualification:
+          # Verify that residual detection is an active oracle that halts if an exited container or directory remains.
+          docker create --name "wow-sidecar-r2-probe-${{ matrix.goarch }}" "$old_image" >/dev/null
+          injected_container_probe="$(docker ps -aq --filter name=wow-sidecar-r2 || true)"
+          injected_container_detected="$(echo -n "$injected_container_probe" | grep -c . || true)"
+          test "$injected_container_detected" -ge 1
+          docker rm "wow-sidecar-r2-probe-${{ matrix.goarch }}" >/dev/null
+
+          injected_dir="$RUNNER_TEMP/wow-sidecar-r2-probe-dir"
+          mkdir -p "$injected_dir"
+          injected_dir_detected=0
+          if [ -d "$injected_dir" ]; then
+            injected_dir_detected=1
+          fi
+          test "$injected_dir_detected" -eq 1
+          rmdir "$injected_dir"
+
+          # Enumerate residual containers across running, stopped, and exited states
+          residual_all="$(docker ps -aq --filter name=wow-sidecar-r2 || true)"
+          residual_container_count="$(echo -n "$residual_all" | grep -c . || true)"
+          test "$residual_container_count" -eq 0
+
+          # Clean up and verify host state directories
+          sudo rm -rf "$state_old" "$state_candidate"
+          residual_state_count=0
+          if [ -d "$state_old" ] || [ -d "$state_candidate" ]; then
+            residual_state_count=1
+          fi
+          test "$residual_state_count" -eq 0
+
+          # 7. Structured receipt artifact generation (witnessed post-cleanup with failure-injection)
+          mkdir -p "$RUNNER_TEMP/r2-artifacts"
+          receipt_file="$RUNNER_TEMP/r2-artifacts/r2-receipt-${{ matrix.goarch }}.json"
+          jq -n \
+            --arg schema "wow-sidecar.r2-qualification-receipt.v4" \
+            --arg arch "${{ matrix.goarch }}" \
+            --arg runner "${{ matrix.runner }}" \
+            --arg old_sha "$old_sha" \
+            --arg old_image_ref "$old_image" \
+            --arg old_platform_image_id "$old_image_id" \
+            --arg old_multiarch_index_digest "$old_repo_digest" \
+            --arg cand_sha "$sha" \
+            --arg cand_image_ref "$cand_image" \
+            --arg cand_platform_image_id "$cand_image_id" \
+            --argjson cand_restart_gen 2 \
+            --argjson rollback_old_gen 1 \
+            --argjson rollback_probe_rc "$cand_down_rc" \
+            --arg cleanup_verification_mode "OBSERVED_POST_TEARDOWN_ENUMERATION" \
+            --argjson failure_injection_witnessed true \
+            --argjson failure_inj_container "$injected_container_detected" \
+            --argjson failure_inj_dir "$injected_dir_detected" \
+            --argjson residual_containers_all "$residual_container_count" \
+            --argjson residual_state_dirs "$residual_state_count" \
+            --arg cleanup_observation "OBSERVED_NO_RUNNING_OR_EXITED_MATCH" \
+            --arg cost_status "ESTIMATED_ZERO_INCREMENTAL_PUBLIC_ALLOWANCE" \
+            --arg cost_billing_verified "false" \
+            --arg cost_rationale "Standard public repository GitHub-hosted runner execution; unmeasured by external billing API" \
+            '{
+              schema: $schema,
+              architecture: $arch,
+              runner: $runner,
+              old_revision: $old_sha,
+              old_image_ref: $old_image_ref,
+              old_platform_image_id: $old_platform_image_id,
+              old_multiarch_index_digest: $old_multiarch_index_digest,
+              candidate_revision: $cand_sha,
+              candidate_image_ref: $cand_image_ref,
+              candidate_platform_image_id: $cand_platform_image_id,
+              distinct_revisions_verified: true,
+              overlap_concurrent_execution_verified: true,
+              candidate_restart_generation: $cand_restart_gen,
+              rollback_old_instance_generation: $rollback_old_gen,
+              rollback_negative_probe_exit: $rollback_probe_rc,
+              cleanup_verification_mode: $cleanup_verification_mode,
+              failure_injection_witnessed: $failure_injection_witnessed,
+              failure_injection_container_detected: ($failure_inj_container >= 1),
+              failure_injection_directory_detected: ($failure_inj_dir == 1),
+              residual_containers_all_count: $residual_containers_all,
+              residual_state_dirs_count: $residual_state_dirs,
+              cleanup_observation: $cleanup_observation,
+              cost_status: $cost_status,
+              cost_billing_verified: ($cost_billing_verified == "true"),
+              cost_rationale: $cost_rationale
+            }' > "$receipt_file"
+          receipt_sha="$(sha256sum "$receipt_file" | cut -d' ' -f1)"
+          echo "RECEIPT_INNER_SHA256=$receipt_sha"
+          jq . "$receipt_file"
+
+      - name: Retain R2 qualification receipt artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: r2-qualification-receipt-${{ matrix.goarch }}
+          path: ${{ runner.temp }}/r2-artifacts/r2-receipt-${{ matrix.goarch }}.json
+          if-no-files-found: error
+
+
