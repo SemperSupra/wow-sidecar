@@ -1,0 +1,19 @@
+# SYNTHETIC ONLY: intentionally nonexistent digest; never deploy or pull.
+# No policy, private source, secrets, or host-specific data are included.
+[Unit]
+Description=WOW public-safe synthetic rootless Podman Quadlet generator fixture
+
+[Container]
+Image=ghcr.io/sempersupra/wow-sidecar@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+Pull=never
+ContainerName=wow-public-quadlet-synthetic
+ReadOnly=true
+User=10001
+PublishPort=127.0.0.1:18080:8080
+
+[Service]
+Restart=on-failure
+TimeoutStartSec=120
+
+[Install]
+WantedBy=default.target
