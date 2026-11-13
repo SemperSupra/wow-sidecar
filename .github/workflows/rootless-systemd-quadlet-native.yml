@@ -1,0 +1,157 @@
+name: Public-safe native rootless user systemd Quadlet lifecycle (synthetic)
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - .github/workflows/rootless-systemd-quadlet-native.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wow-public-systemd-quadlet-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  native-user-systemd-quadlet:
+    if: github.event.pull_request.head.repo.full_name == 'SemperSupra/wow-sidecar' && github.event.pull_request.head.ref == 'rdte/public-rootless-systemd-quadlet-20261113' && github.event.pull_request.base.ref == 'rdte/public-rootless-podman-replacement-20261113'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      GOTOOLCHAIN: local
+      GOPROXY: 'off'
+      GOSUMDB: 'off'
+      GOWORK: 'off'
+    steps:
+      - name: Checkout exact public synthetic source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Native Podman and real user systemd manager
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq podman uidmap slirp4netns fuse-overlayfs
+          podman --version
+          test "$(id -u)" -ne 0
+          sudo loginctl enable-linger "$(id -un)"
+          sudo systemctl start "user@$(id -u).service"
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+          test -S "$XDG_RUNTIME_DIR/bus"
+          systemctl --user --version
+          systemctl --user is-system-running || true
+          echo "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" >> "$GITHUB_ENV"
+          echo "CANDIDATE_SHA=$(git rev-parse HEAD)"
+      - name: Build independent local synthetic A and B OCI images
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
+            -o qualification/quadlet/synthetic-runtime/synthetic-wow \
+            ./qualification/quadlet/synthetic-runtime
+          for version in A B; do
+            podman build --no-cache --pull=never --format=oci \
+              --build-arg "SYNTHETIC_VERSION=$version" \
+              -t "localhost/wow-quadlet-synthetic:$version" \
+              -f qualification/quadlet/synthetic-runtime/Dockerfile \
+              qualification/quadlet/synthetic-runtime
+          done
+          a="$(podman image inspect localhost/wow-quadlet-synthetic:A --format '{{.Id}}')"
+          b="$(podman image inspect localhost/wow-quadlet-synthetic:B --format '{{.Id}}')"
+          test "$a" != "$b"
+      - name: User-systemd Quadlet install, upgrade, intentional failure, rollback and recovery
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          state="$RUNNER_TEMP/wow-synthetic-systemd-state"
+          install -d -m 0700 "$state"
+          podman unshare chown 10001:10001 "$state"
+          quadletDir="$HOME/.config/containers/systemd"
+          install -d -m 0700 "$quadletDir"
+          unitFile="$quadletDir/wow-synthetic-systemd.container"
+          service=wow-synthetic-systemd.service
+          cleanup() {
+            systemctl --user stop "$service" >/dev/null 2>&1 || true
+            rm -f "$unitFile"
+            systemctl --user daemon-reload >/dev/null 2>&1 || true
+            podman rm -f wow-synthetic-systemd >/dev/null 2>&1 || true
+          }
+          diagnose() {
+            systemctl --user status "$service" --no-pager >&2 || true
+            journalctl --user -u "$service" --no-pager -n 35 >&2 || true
+            podman ps -a >&2 || true
+            podman logs --tail=30 wow-synthetic-systemd >&2 || true
+          }
+          trap cleanup EXIT
+          writeUnit() {
+            version="$1"
+            node="$2"
+            temp="$unitFile.candidate"
+            cat > "$temp" <<QUADLET
+          [Unit]
+          Description=Public-safe rootless synthetic systemd Quadlet (not Pandora)
+
+          [Container]
+          Image=localhost/wow-quadlet-synthetic:$version
+          Pull=never
+          ContainerName=wow-synthetic-systemd
+          ReadOnly=true
+          User=10001:10001
+          PublishPort=127.0.0.1:18080:8080
+          Volume=$state:/var/lib/wow-sidecar
+          Environment=WOW_NODE_ID=$node
+          Environment=WOW_LOCALITY=cloud
+          Environment=WOW_LISTEN_ADDR=0.0.0.0:8080
+
+          [Service]
+          Restart=no
+          TimeoutStartSec=90
+
+          [Install]
+          WantedBy=default.target
+          QUADLET
+            mv -f "$temp" "$unitFile"
+            systemctl --user daemon-reload
+            systemctl --user show "$service" --property=LoadState | grep -Fxq LoadState=loaded
+          }
+          ready() {
+            version="$1"
+            for _ in $(seq 1 30); do
+              if curl --fail --silent http://127.0.0.1:18080/healthz \
+                | jq -e --arg version "$version" '.status=="ok" and .version==$version' >/dev/null; then
+                curl --fail --silent http://127.0.0.1:18080/readyz \
+                  | jq -e --arg version "$version" '.status=="ready" and .version==$version' >/dev/null
+                return
+              fi
+              sleep 1
+            done
+            diagnose
+            return 1
+          }
+          writeUnit A synthetic-a
+          systemctl --user start "$service"
+          ready A
+          systemctl --user show "$service" -p ActiveState | grep -Fxq ActiveState=active
+          writeUnit B synthetic-b
+          systemctl --user restart "$service"
+          ready B
+          writeUnit B ""
+          systemctl --user restart "$service" || true
+          sleep 2
+          if curl --fail --silent http://127.0.0.1:18080/readyz \
+            | jq -e '.status == "ready"' >/dev/null; then
+            echo 'broken Quadlet candidate unexpectedly healthy' >&2
+            diagnose
+            exit 1
+          fi
+          writeUnit A synthetic-restored
+          systemctl --user restart "$service"
+          ready A
+          podman unshare cat "$state/synthetic-receipts"
+          test "$(podman unshare cat "$state/synthetic-receipts")" = "$(printf 'A\nB\nA')"
+          echo 'PUBLIC_SYNTHETIC_USER_SYSTEMD_QUADLET_A_B_A_PASS' >> "$GITHUB_STEP_SUMMARY"
