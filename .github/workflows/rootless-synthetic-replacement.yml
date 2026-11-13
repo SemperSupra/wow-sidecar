@@ -45,12 +45,18 @@ jobs:
           set -Eeuo pipefail
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o qualification/quadlet/synthetic-runtime/synthetic-wow ./qualification/quadlet/synthetic-runtime
           for version in A B; do
-            podman build --pull=never --format=oci \
+            podman build --no-cache --pull=never --format=oci \
               --build-arg "SYNTHETIC_VERSION=$version" \
               -t "localhost/wow-quadlet-synthetic:$version" \
               -f qualification/quadlet/synthetic-runtime/Dockerfile \
               qualification/quadlet/synthetic-runtime
           done
+          for version in A B; do
+            podman image inspect "localhost/wow-quadlet-synthetic:$version" --format '{{.Id}} {{.Config.Env}}'
+          done
+          a="$(podman image inspect localhost/wow-quadlet-synthetic:A --format '{{.Id}}')"
+          b="$(podman image inspect localhost/wow-quadlet-synthetic:B --format '{{.Id}}')"
+          test "$a" != "$b"
       - name: Native rootless stage, replace, fail and restore external state
         shell: bash
         run: |
@@ -84,6 +90,11 @@ jobs:
                 return
               fi
               sleep 1
+            done
+            echo "Synthetic readiness failed for $version; diagnostic container evidence follows" >&2
+            podman ps -a >&2 || true
+            for candidate in wow-synthetic-a wow-synthetic-b wow-synthetic-restored; do
+              podman logs --tail=50 "$candidate" >&2 || true
             done
             return 1
           }
