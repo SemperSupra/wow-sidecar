@@ -1,0 +1,107 @@
+name: Public-safe rootless Podman synthetic replacement (no host)
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - qualification/quadlet/synthetic-runtime/**
+      - .github/workflows/rootless-synthetic-replacement.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wow-public-rootless-replacement-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  synthetic-rootless-container-lifecycle:
+    if: github.event.pull_request.head.repo.full_name == 'SemperSupra/wow-sidecar' && github.event.pull_request.head.ref == 'rdte/public-rootless-podman-replacement-20261113' && github.event.pull_request.base.ref == 'rdte/public-synthetic-podman-quadlet-generator-20261113'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      GOTOOLCHAIN: local
+      GOPROXY: 'off'
+      GOSUMDB: 'off'
+      GOWORK: 'off'
+    steps:
+      - name: Checkout exact public synthetic PR head
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Native Podman rootless version and prerequisites
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq podman uidmap slirp4netns fuse-overlayfs
+          podman version
+          echo "CANDIDATE_SHA=$(git rev-parse HEAD)"
+          test "$(id -u)" -ne 0
+      - name: Build two local synthetic scratch images without a registry pull
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o qualification/quadlet/synthetic-runtime/synthetic-wow ./qualification/quadlet/synthetic-runtime
+          for version in A B; do
+            podman build --pull=never --format=oci \
+              --build-arg "SYNTHETIC_VERSION=$version" \
+              -t "localhost/wow-quadlet-synthetic:$version" \
+              -f qualification/quadlet/synthetic-runtime/Dockerfile \
+              qualification/quadlet/synthetic-runtime
+          done
+      - name: Native rootless stage, replace, fail and restore external state
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          state="$RUNNER_TEMP/wow-quadlet-synthetic-state"
+          install -d -m 0700 "$state"
+          podman unshare chown 10001:10001 "$state"
+          cleanup() {
+            podman rm -f wow-synthetic-a wow-synthetic-b wow-synthetic-broken wow-synthetic-restored >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          run_synthetic() {
+            name="$1"
+            version="$2"
+            node="$3"
+            podman run -d --name "$name" --pull=never \
+              --read-only --user 10001:10001 \
+              -e "WOW_NODE_ID=$node" \
+              -e WOW_LOCALITY=cloud -e WOW_LISTEN_ADDR=0.0.0.0:8080 \
+              -p 127.0.0.1:18080:8080 \
+              --mount "type=bind,src=$state,dst=/var/lib/wow-sidecar" \
+              "localhost/wow-quadlet-synthetic:$version" >/dev/null
+          }
+          ready() {
+            version="$1"
+            for _ in $(seq 1 30); do
+              if curl --fail --silent http://127.0.0.1:18080/healthz \
+                | jq -e --arg version "$version" '.status=="ok" and .version==$version' >/dev/null; then
+                curl --fail --silent http://127.0.0.1:18080/readyz \
+                  | jq -e --arg version "$version" '.status=="ready" and .version==$version' >/dev/null
+                return
+              fi
+              sleep 1
+            done
+            return 1
+          }
+          run_synthetic wow-synthetic-a A synthetic-a
+          ready A
+          podman inspect wow-synthetic-a --format '{{.HostConfig.ReadonlyRootfs}}' | grep -Fxq true
+          podman inspect wow-synthetic-a --format '{{.Config.User}}' | grep -Fxq '10001:10001'
+          podman rm -f wow-synthetic-a >/dev/null
+          run_synthetic wow-synthetic-b B synthetic-b
+          ready B
+          podman rm -f wow-synthetic-b >/dev/null
+          # No candidate credentials: the bad B cannot pass startup or write.
+          run_synthetic wow-synthetic-broken B ""
+          sleep 2
+          test "$(podman inspect wow-synthetic-broken --format '{{.State.Running}}')" = false
+          podman rm -f wow-synthetic-broken >/dev/null
+          run_synthetic wow-synthetic-restored A synthetic-restored
+          ready A
+          podman unshare cat "$state/synthetic-receipts"
+          test "$(podman unshare cat "$state/synthetic-receipts")" = "$(printf 'A\nB\nA')"
+          echo 'PUBLIC_SYNTHETIC_ROOTLESS_PODMAN_REPLACEMENT_AND_STATE_PASS' >> "$GITHUB_STEP_SUMMARY"
