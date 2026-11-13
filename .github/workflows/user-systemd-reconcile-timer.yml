@@ -1,0 +1,111 @@
+name: Public-safe one systemd reconciler for manual and timer ingress
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - .github/workflows/user-systemd-reconcile-timer.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wow-public-reconcile-timer-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  native-user-timer-synthetic:
+    if: github.event.pull_request.head.repo.full_name == 'SemperSupra/wow-sidecar' && github.event.pull_request.head.ref == 'rdte/public-user-systemd-reconcile-timer-20261113' && github.event.pull_request.base.ref == 'rdte/public-rootless-quadlet-sigkill-recovery-20261113'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout exact public synthetic candidate
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Start real user-systemd manager
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(id -u)" -ne 0
+          sudo loginctl enable-linger "$(id -un)"
+          sudo systemctl start "user@$(id -u).service"
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+          test -S "$XDG_RUNTIME_DIR/bus"
+          systemctl --user --version
+          echo "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" >> "$GITHUB_ENV"
+          echo "CANDIDATE_SHA=$(git rev-parse HEAD)"
+      - name: Qualify shared immutable synthetic reconciler via manual and timer
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          service=wow-synthetic-reconcile.service
+          timer=wow-synthetic-reconcile.timer
+          unitdir="$HOME/.config/systemd/user"
+          program="$HOME/.local/libexec/wow-synthetic-reconcile"
+          ledger="$HOME/.local/state/wow-synthetic-reconcile/receipts"
+          install -d -m 0700 "$unitdir" "$(dirname "$program")" "$(dirname "$ledger")"
+          cleanup() {
+            systemctl --user disable --now "$timer" >/dev/null 2>&1 || true
+            systemctl --user stop "$service" >/dev/null 2>&1 || true
+            rm -f "$unitdir/$service" "$unitdir/$timer" "$program"
+            systemctl --user daemon-reload >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          cat > "$program" <<'RECONCILE'
+          #!/bin/sh
+          set -eu
+          # Public synthetic fixture: no image pull, shell delegation, source,
+          # owner policy, secrets or host effects. A fixed single entrypoint
+          # is shared by timer and manual service initiation.
+          printf '%s\n' 'SIMULATED_PLAN_HOLD_NO_HOST_EFFECT' >> "$HOME/.local/state/wow-synthetic-reconcile/receipts"
+          RECONCILE
+          chmod 0700 "$program"
+          cat > "$unitdir/$service" <<'SERVICE'
+          [Unit]
+          Description=Public synthetic readonly single-path updater
+          [Service]
+          Type=oneshot
+          ExecStart=%h/.local/libexec/wow-synthetic-reconcile
+          NoNewPrivileges=true
+          SERVICE
+          cat > "$unitdir/$timer" <<'TIMER'
+          [Unit]
+          Description=Public synthetic bounded systemd update trigger
+          [Timer]
+          OnActiveSec=2s
+          OnUnitActiveSec=3s
+          Unit=wow-synthetic-reconcile.service
+          [Install]
+          WantedBy=timers.target
+          TIMER
+          systemctl --user daemon-reload
+          systemctl --user show "$service" -p LoadState | grep -Fxq 'LoadState=loaded'
+          systemctl --user start "$service"
+          test "$(wc -l < "$ledger")" -eq 1
+          systemctl --user enable --now "$timer"
+          timed=false
+          for _ in $(seq 1 40); do
+            if test "$(wc -l < "$ledger")" -ge 2; then timed=true; break; fi
+            sleep 1
+          done
+          if [[ "$timed" != true ]]; then
+            systemctl --user status "$timer" "$service" --no-pager >&2 || true
+            journalctl --user -u "$timer" -u "$service" --no-pager -n 30 >&2 || true
+            exit 1
+          fi
+          systemctl --user is-active "$timer" | grep -Fxq active
+          systemctl --user show "$timer" -p Unit | grep -Fxq Unit=wow-synthetic-reconcile.service
+          systemctl --user stop "$timer"
+          before="$(wc -l < "$ledger")"
+          systemctl --user start "$service"
+          test "$(wc -l < "$ledger")" -eq "$((before + 1))"
+          if grep -vFxq 'SIMULATED_PLAN_HOLD_NO_HOST_EFFECT' "$ledger"; then
+            echo 'unexpected synthetic update action emitted' >&2
+            exit 1
+          fi
+          printf 'MANUAL_AND_TIMER_SHARED_RECONCILER_COUNT=%s\n' "$(wc -l < "$ledger")"
+          echo 'PUBLIC_SYNTHETIC_SINGLE_SYSTEMD_RECONCILER_MANUAL_TIMER_PASS_NO_EFFECT' >> "$GITHUB_STEP_SUMMARY"
