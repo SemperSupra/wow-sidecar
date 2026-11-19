@@ -1,0 +1,65 @@
+name: Public-safe rootless Quadlet generator qualification (synthetic only)
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - qualification/quadlet/wow-public-synthetic.container
+      - .github/workflows/quadlet-synthetic-generator.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wow-public-quadlet-synthetic-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  native-quadlet-generator:
+    if: github.event.pull_request.head.repo.full_name == 'SemperSupra/wow-sidecar' && github.event.pull_request.head.ref == 'rdte/public-synthetic-podman-quadlet-generator-20261113'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - name: Checkout exact public fixture
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Install Ubuntu native Podman generator
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq podman
+          podman --version
+      - name: Execute rootless Quadlet generator without pulling image or starting services
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          root="$RUNNER_TEMP/wow-quadlet-synthetic"
+          mkdir -p "$root"
+          cp qualification/quadlet/wow-public-synthetic.container "$root/"
+          file="$root/wow-public-synthetic.container"
+          # Fail before generator on any accidental mutable ref or public port.
+          grep -Fxq 'Image=ghcr.io/sempersupra/wow-sidecar@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "$file"
+          grep -Fxq 'Pull=never' "$file"
+          grep -Fxq 'ReadOnly=true' "$file"
+          grep -Fxq 'PublishPort=127.0.0.1:18080:8080' "$file"
+          if grep -Eq '^(AutoUpdate=registry|EnvironmentFile=|Secret=|Volume=)' "$file"; then
+            echo 'Unsafe or unqualified host-specific directive' >&2
+            exit 1
+          fi
+          generator=''
+          for path in /usr/lib/systemd/system-generators/podman-system-generator /usr/libexec/podman/quadlet /usr/libexec/podman/podman-system-generator; do
+            if [[ -x "$path" ]]; then generator="$path"; break; fi
+          done
+          test -n "$generator"
+          echo "PODMAN_GENERATOR=$generator"
+          QUADLET_UNIT_DIRS="$root" "$generator" --user --dryrun > "$RUNNER_TEMP/generated-unit.txt" 2>&1
+          cat "$RUNNER_TEMP/generated-unit.txt"
+          grep -Fq 'wow-public-synthetic.service' "$RUNNER_TEMP/generated-unit.txt"
+          grep -Fq 'ghcr.io/sempersupra/wow-sidecar@sha256:aaaaaaaa' "$RUNNER_TEMP/generated-unit.txt"
+          grep -Eq -- '--read-only([[:space:]]|$)' "$RUNNER_TEMP/generated-unit.txt"
+          grep -Eq -- '--pull[=[:space:]]never' "$RUNNER_TEMP/generated-unit.txt"
+          grep -Fq '127.0.0.1:18080:8080' "$RUNNER_TEMP/generated-unit.txt"
+          echo 'PUBLIC_SYNTHETIC_ROOTLESS_QUADLET_GENERATOR_PASS_NO_SERVICE_NO_PULL' >> "$GITHUB_STEP_SUMMARY"
