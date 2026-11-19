@@ -1,0 +1,33 @@
+name: WOW Sidecar synthetic claim 422 readback negatives
+on:
+  pull_request:
+    paths:
+      - 'src/wow_sidecar/idempotent_github_effect.py'
+      - 'tests/test_github_claim_422_malformed_readback.py'
+      - 'tests/test_github_claim_422_disambiguation.py'
+      - '.github/workflows/claim-422-readback-qualification.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  readback-negatives:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+      - name: Read-only synthetic transport negative suite
+        shell: bash
+        env:
+          PYTHONPATH: src
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD
+          python -m unittest -v \
+            tests.test_github_claim_422_disambiguation \
+            tests.test_github_claim_422_malformed_readback
