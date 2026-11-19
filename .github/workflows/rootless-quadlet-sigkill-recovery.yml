@@ -1,0 +1,147 @@
+name: Public-safe rootless Quadlet SIGKILL and user-manager recovery (synthetic)
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - .github/workflows/rootless-quadlet-sigkill-recovery.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wow-public-quadlet-crash-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  rootless-synthetic-crash-recovery:
+    if: github.event.pull_request.head.repo.full_name == 'SemperSupra/wow-sidecar' && github.event.pull_request.head.ref == 'rdte/public-rootless-quadlet-sigkill-recovery-20261113' && github.event.pull_request.base.ref == 'rdte/public-rootless-systemd-quadlet-20261113'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    env:
+      GOTOOLCHAIN: local
+      GOPROXY: 'off'
+      GOSUMDB: 'off'
+      GOWORK: 'off'
+    steps:
+      - name: Checkout exact public synthetic PR
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Install Podman and prepare dedicated rootless user manager
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq podman uidmap slirp4netns fuse-overlayfs
+          sudo loginctl enable-linger "$(id -un)"
+          sudo systemctl start "user@$(id -u).service"
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+          test -S "$XDG_RUNTIME_DIR/bus"
+          echo "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" >> "$GITHUB_ENV"
+          podman --version
+          echo "CANDIDATE_SHA=$(git rev-parse HEAD)"
+      - name: Build one local no-registry synthetic scratch service
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
+            -o qualification/quadlet/synthetic-runtime/synthetic-wow \
+            ./qualification/quadlet/synthetic-runtime
+          podman build --no-cache --pull=never --format=oci \
+            --build-arg SYNTHETIC_VERSION=A \
+            -t localhost/wow-quadlet-synthetic:A \
+            -f qualification/quadlet/synthetic-runtime/Dockerfile \
+            qualification/quadlet/synthetic-runtime
+      - name: Native user-systemd detects SIGKILL and preserves external state after recovery
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          service='wow-synthetic-recovery.service'
+          unitdir="$HOME/.config/containers/systemd"
+          unit="$unitdir/wow-synthetic-recovery.container"
+          state="$RUNNER_TEMP/wow-synthetic-recovery-state"
+          install -d -m 0700 "$unitdir" "$state"
+          podman unshare chown 10001:10001 "$state"
+          cleanup() {
+            systemctl --user stop "$service" >/dev/null 2>&1 || true
+            rm -f "$unit"
+            systemctl --user daemon-reload >/dev/null 2>&1 || true
+            podman rm -f wow-synthetic-recovery >/dev/null 2>&1 || true
+          }
+          diagnose() {
+            systemctl --user status "$service" --no-pager >&2 || true
+            journalctl --user -u "$service" --no-pager -n 50 >&2 || true
+            podman ps -a >&2 || true
+            podman logs --tail=40 wow-synthetic-recovery >&2 || true
+          }
+          trap cleanup EXIT
+          cat > "$unit" <<QUADLET
+          [Unit]
+          Description=Public safe synthetic rootless Quadlet crash recovery
+          [Container]
+          Image=localhost/wow-quadlet-synthetic:A
+          Pull=never
+          ContainerName=wow-synthetic-recovery
+          ReadOnly=true
+          User=10001:10001
+          PublishPort=127.0.0.1:18080:8080
+          Volume=$state:/var/lib/wow-sidecar
+          Environment=WOW_NODE_ID=public-synthetic-recovery
+          Environment=WOW_LOCALITY=cloud
+          Environment=WOW_LISTEN_ADDR=0.0.0.0:8080
+          [Service]
+          Restart=on-failure
+          RestartSec=1
+          StartLimitIntervalSec=60
+          StartLimitBurst=6
+          TimeoutStartSec=90
+          [Install]
+          WantedBy=default.target
+          QUADLET
+          systemctl --user daemon-reload
+          systemctl --user show "$service" -p LoadState | grep -Fxq LoadState=loaded
+          systemctl --user start "$service"
+          ready() {
+            for _ in $(seq 1 45); do
+              if curl --fail --silent http://127.0.0.1:18080/readyz \
+                | jq -e '.status=="ready" and .version=="A"' >/dev/null; then
+                return 0
+              fi
+              sleep 1
+            done
+            diagnose
+            return 1
+          }
+          ready
+          count() { podman unshare cat "$state/synthetic-receipts" | wc -l | tr -d ' '; }
+          test "$(count)" = 1
+          old_id="$(podman inspect wow-synthetic-recovery --format '{{.Id}}')"
+          podman kill --signal=KILL wow-synthetic-recovery
+          recovered=false
+          for _ in $(seq 1 45); do
+            new_id="$(podman inspect wow-synthetic-recovery --format '{{.Id}}' 2>/dev/null || true)"
+            if [[ -n "$new_id" && "$new_id" != "$old_id" && "$(count)" == 2 ]]; then
+              if curl --fail --silent http://127.0.0.1:18080/readyz \
+                | jq -e '.status=="ready" and .version=="A"' >/dev/null; then
+                recovered=true
+                break
+              fi
+            fi
+            sleep 1
+          done
+          if [[ "$recovered" != true ]]; then
+            echo 'Rootless systemd automatic restart and state continuity not proved' >&2
+            diagnose
+            exit 1
+          fi
+          systemctl --user show "$service" -p ActiveState | grep -Fxq ActiveState=active
+          # Reexecuting the manager is NOT a host reboot, but verifies a
+          # control-plane reexec does not silently lose the recovered service.
+          systemctl --user daemon-reexec
+          ready
+          test "$(podman unshare cat "$state/synthetic-receipts")" = "$(printf 'A\nA')"
+          echo 'PUBLIC_SYNTHETIC_ROOTLESS_QUADLET_SIGKILL_AUTORESTART_PASS_NO_REBOOT' >> "$GITHUB_STEP_SUMMARY"
